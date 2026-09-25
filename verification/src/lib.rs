@@ -2513,7 +2513,11 @@ fn smoke_frame_x86_64_int80_dispatches_through_global() -> TestResult {
 
     struct Probe;
     impl SyscallInterceptor for Probe {
-        fn on_syscall_enter(&self, invocation: &SyscallInvocation) -> SyscallInterception {
+        fn on_syscall_enter(
+            &self,
+            invocation: &SyscallInvocation,
+            _native: &mut dyn narf_userspace::NativeSyscallTransition,
+        ) -> SyscallInterception {
             ENTERS.fetch_add(1, Ordering::Relaxed);
             if invocation.syscall.is_none() {
                 UNKNOWN.fetch_add(1, Ordering::Relaxed);
@@ -2630,7 +2634,11 @@ fn smoke_frame_aarch64_svc_dispatches_through_global() -> TestResult {
 
     struct Probe;
     impl SyscallInterceptor for Probe {
-        fn on_syscall_enter(&self, invocation: &SyscallInvocation) -> SyscallInterception {
+        fn on_syscall_enter(
+            &self,
+            invocation: &SyscallInvocation,
+            _native: &mut dyn narf_userspace::NativeSyscallTransition,
+        ) -> SyscallInterception {
             ENTERS.fetch_add(1, Ordering::Relaxed);
             if invocation.syscall.is_none() {
                 UNKNOWN.fetch_add(1, Ordering::Relaxed);
@@ -3266,7 +3274,11 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
 
     struct Probe;
     impl SyscallInterceptor for Probe {
-        fn on_syscall_enter(&self, invocation: &SyscallInvocation) -> SyscallInterception {
+        fn on_syscall_enter(
+            &self,
+            invocation: &SyscallInvocation,
+            _native: &mut dyn narf_userspace::NativeSyscallTransition,
+        ) -> SyscallInterception {
             if invocation.raw_number == 0x3fff && invocation.syscall.is_none() {
                 FAST_ENTRIES.fetch_add(1, Ordering::Relaxed);
                 SyscallInterception::Complete(SyscallReturn::ok(SYSCALL_MAGIC))
