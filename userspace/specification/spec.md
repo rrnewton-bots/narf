@@ -31,6 +31,30 @@ pub fn spawn_process(elf: &Elf, caps: CapBundle) -> Cap<Process, Own>;
 pub fn exec_into(proc: &Process, arg0: &str, argv: &[&str], env: &[&str]);
 ```
 
+The live syscall table has one optional, first-class interception layer. A
+caller constructing `SyscallTable` may install exactly one owned
+`SyscallInterceptor` before publishing the table with `install_global`; a
+second installation is rejected and a published table never swaps interceptor
+identity. For every known or unknown wire number, the dispatcher snapshots the
+raw number (including version bits), canonical variant when one exists, six
+register arguments, task identity, user instruction pointer, and user stack
+pointer. It then invokes `on_syscall_enter`, executes the native handler at
+most once unless entry supplied a complete result, and invokes
+`on_syscall_exit`. Exit observes either an exact `SyscallReturn` or the typed
+`ContextManaged` state used for a park/redirection; it may replace a normal
+return but cannot silently turn a context-managed path into a fabricated native
+completion. Unknown syscalls traverse the same layer and retain Linux
+`-ENOSYS`/NARF `InvalidOp` unless the interceptor explicitly replaces them.
+
+The interceptor object is shared directly by dispatcher calls on every CPU and
+must synchronize its own mutable state and filter task identities itself. Its
+ownership is deliberately process-global and in-address-space: this interface
+does not impose a queue, RPC channel, ptrace stop, signal trampoline, binary
+rewrite, or polling loop merely to share extension state. The initial contract
+is synchronous and does not itself authorize a userspace callback or an async
+wait; those require a separate task-lifetime and suspension interface rather
+than blocking or re-entering the scheduler from the syscall trap.
+
 `load_user_process_with_root` is the kernel-boot counterpart to an exec under
 an already-established process root: it resolves a filesystem-backed
 `PT_INTERP` beneath an explicit mounted-root prefix, and the caller installs
