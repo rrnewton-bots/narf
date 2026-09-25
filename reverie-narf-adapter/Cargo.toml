@@ -11,7 +11,7 @@ repository.workspace = true
 narf-lib = { path = "../lib" }
 narf-kernel-test = { path = "../verification/kernel-test" }
 narf-userspace = { path = "../userspace" }
-reverie-narf-core = { git = "https://github.com/rrnewton/reverie", rev = "08a70a2e1562de1602d20e8bf1f6b2238aec7ee5" }
+reverie-narf-core = { git = "https://github.com/rrnewton/reverie", rev = "79da59f3ce93e5aa3065cc284c077bedda88de5a" }
 
 [lints]
 workspace = true

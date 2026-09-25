@@ -2416,7 +2416,7 @@ dependencies = [
 [[package]]
 name = "reverie-narf-core"
 version = "0.2.0"
-source = "git+https://github.com/rrnewton/reverie?rev=08a70a2e1562de1602d20e8bf1f6b2238aec7ee5#08a70a2e1562de1602d20e8bf1f6b2238aec7ee5"
+source = "git+https://github.com/rrnewton/reverie?rev=79da59f3ce93e5aa3065cc284c077bedda88de5a#79da59f3ce93e5aa3065cc284c077bedda88de5a"
 
 [[package]]
 name = "rustc_version"

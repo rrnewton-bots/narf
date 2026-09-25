@@ -16,13 +16,13 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use narf_lib::sync::IrqSafeSpinLock;
 use narf_userspace::syscall::{
-    NativeSyscallAlreadyExecuted, NativeSyscallOutcome, NativeSyscallRequest,
+    NativeSyscallOriginalError, NativeSyscallOutcome, NativeSyscallRequest,
     NativeSyscallTransition, SyscallArgs, SyscallInterception, SyscallInterceptor,
     SyscallInvocation, SyscallReturn,
 };
 use reverie_narf_core::{
     drive_syscall, DrivenSyscall, KernelTransition, NarfSyscallOutcome, NarfSyscallRequest,
-    OriginalAlreadyExecuted, SyscallEvent, Tool,
+    OriginalSyscallError, SyscallEvent, Tool,
 };
 
 enum ThreadSlot<S> {
@@ -75,11 +75,16 @@ struct Transition<'a> {
 }
 
 impl KernelTransition for Transition<'_> {
-    fn execute_original(&mut self) -> Result<NarfSyscallOutcome, OriginalAlreadyExecuted> {
+    fn execute_original(&mut self) -> Result<NarfSyscallOutcome, OriginalSyscallError> {
         self.native
             .execute_original()
             .map(map_native_outcome)
-            .map_err(|NativeSyscallAlreadyExecuted| OriginalAlreadyExecuted)
+            .map_err(|error| match error {
+                NativeSyscallOriginalError::AlreadyExecuted => {
+                    OriginalSyscallError::AlreadyExecuted
+                }
+                NativeSyscallOriginalError::ContextManaged => OriginalSyscallError::ContextManaged,
+            })
     }
 
     fn execute_injected(&mut self, request: NarfSyscallRequest) -> NarfSyscallOutcome {
@@ -92,7 +97,9 @@ impl KernelTransition for Transition<'_> {
 
 fn map_native_outcome(outcome: NativeSyscallOutcome) -> NarfSyscallOutcome {
     match outcome {
-        NativeSyscallOutcome::Returned(result) => NarfSyscallOutcome::Returned(result.value as i64),
+        NativeSyscallOutcome::Returned(result) => {
+            NarfSyscallOutcome::Returned(result.linux_abi_result())
+        }
         NativeSyscallOutcome::ContextManaged => NarfSyscallOutcome::ContextManaged,
     }
 }
@@ -246,13 +253,11 @@ mod tests {
     }
 
     impl NativeSyscallTransition for Native {
-        fn execute_original(
-            &mut self,
-        ) -> Result<NativeSyscallOutcome, NativeSyscallAlreadyExecuted> {
+        fn execute_original(&mut self) -> Result<NativeSyscallOutcome, NativeSyscallOriginalError> {
             if self.original_calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 Ok(NativeSyscallOutcome::Returned(SyscallReturn::ok(37)))
             } else {
-                Err(NativeSyscallAlreadyExecuted)
+                Err(NativeSyscallOriginalError::AlreadyExecuted)
             }
         }
 
@@ -298,8 +303,28 @@ mod tests {
         TestResult::Pass
     }
 
+    fn smoke_non_ok_native_status_matches_x86_linux_abi_result() -> TestResult {
+        let native = SyscallReturn::not_implemented();
+        let backend_off_rax = native.linux_abi_result();
+        let backend_result = match map_native_outcome(NativeSyscallOutcome::Returned(native)) {
+            NarfSyscallOutcome::Returned(value) => value,
+            NarfSyscallOutcome::ContextManaged => {
+                return TestResult::Fail("normal non-Ok return became context-managed");
+            }
+        };
+        let backend_on_rax = SyscallReturn::ok(backend_result as u64).linux_abi_result();
+        if backend_off_rax != -22 || backend_on_rax != backend_off_rax {
+            return TestResult::Fail("adapter did not preserve the architecture status fold");
+        }
+        TestResult::Pass
+    }
+
     kernel_test_in!(
         "reverie-narf",
         smoke_real_narf_transition_with_direct_persistent_state
+    );
+    kernel_test_in!(
+        "reverie-narf",
+        smoke_non_ok_native_status_matches_x86_linux_abi_result
     );
 }

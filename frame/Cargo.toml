@@ -101,7 +101,7 @@ narf-bpf-leds        = { path = "../bpf-leds", optional = true }
 narf-kernel-test     = { path = "../verification/kernel-test" }
 narf-verification    = { path = "../verification", optional = true }
 reverie-narf-adapter = { path = "../reverie-narf-adapter", optional = true }
-reverie-narf-core = { git = "https://github.com/rrnewton/reverie", rev = "08a70a2e1562de1602d20e8bf1f6b2238aec7ee5", optional = true }
+reverie-narf-core = { git = "https://github.com/rrnewton/reverie", rev = "79da59f3ce93e5aa3065cc284c077bedda88de5a", optional = true }
 
 [features]
 # Profiling: emit a `perf stat`-style line (per-CPU narf_lib::perf software
