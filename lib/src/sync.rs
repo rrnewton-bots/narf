@@ -54,9 +54,10 @@ pub fn contended_irq_lock(cpu: usize) -> usize {
 
 /// Run the installed spin-wait hook if any. Tiny by design — one acquire load
 /// and an early return when nothing is wired (kernel-test, pre-boot, or the
-/// xAPIC fallback where shootdowns aren't broadcast).
+/// xAPIC fallback where shootdowns aren't broadcast). The rendezvous
+/// acknowledgement spin in [`crate::smp`] calls this too, for the same reason.
 #[inline(always)]
-fn run_lock_spin_hook() {
+pub(crate) fn run_lock_spin_hook() {
     // The `membarrier(2)` rendezvous has the same stranding problem the
     // installed shootdown hook solves, and one worse consequence: the sender
     // does not give up. A CPU spinning here with IRQs masked cannot take the

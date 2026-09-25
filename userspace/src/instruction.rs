@@ -164,27 +164,28 @@ static IN_INSTRUCTION_CALLBACK: [AtomicBool; narf_lib::percpu::MAX_CPUS] =
 
 /// Publish the kernel-lifetime instruction interceptor exactly once.
 ///
-/// Installation is a pre-guest operation: the caller must not create a user
-/// task until this returns. Publication, the vDSO clock-mode switch, and the
-/// per-CPU trap activation are separate steps, so a guest running during them
-/// could see some CPUs trapping and others not, or a vDSO clock read that
-/// began before the switch. Installation linearizes at its successful return;
-/// because no user task exists from the entry check to the exit check, no
-/// guest observes any intermediate combination.
+/// Installation is a pre-guest operation. Publication, the vDSO clock-mode
+/// switch, and the per-CPU trap activation are separate steps, so a guest
+/// running during them could see some CPUs trapping and others not, or a vDSO
+/// clock read that began before the switch. Installation therefore holds the
+/// scheduler's [`narf_scheduler::UserAdmissionExclusion`] from before
+/// [`InstructionInterceptor::subscriptions`] until every step is complete on
+/// every online CPU: a user task spawned in that window, including by the
+/// interceptor itself, is created but not made runnable until installation
+/// returns, so no guest observes any intermediate combination.
 ///
 /// Returns the interceptor when another one is already published, when a user
-/// task is live, or when a multi-CPU timestamp trap has no SMP rendezvous. A
-/// user task spawned during installation stops the kernel: publication is
-/// one-shot and cannot be rolled back. Schedulers must additionally call
+/// task is live or another admission exclusion is held, or when a multi-CPU
+/// timestamp trap has no SMP rendezvous. Schedulers must additionally call
 /// [`activate_current_cpu_instruction_interception`] before a newly-online CPU
 /// can return an instrumented task to user mode.
 pub fn try_install_instruction_interceptor(
     interceptor: Box<dyn InstructionInterceptor>,
 ) -> Result<(), Box<dyn InstructionInterceptor>> {
-    let spawned = narf_scheduler::user_tasks_spawned();
-    if narf_scheduler::live_user_task_count() != 0 {
+    let Some(exclusion) = narf_scheduler::try_exclude_user_admission() else {
         return Err(interceptor);
-    }
+    };
+    let admitted = narf_scheduler::user_tasks_admitted();
     let subscriptions = interceptor.subscriptions();
     #[cfg(target_arch = "x86_64")]
     if subscriptions.requires_timestamp_trap()
@@ -230,13 +231,15 @@ pub fn try_install_instruction_interceptor(
                     "instruction interception rendezvous disappeared after preflight"
                 );
             }
-            // Every step above is complete on every online CPU. Any user task
-            // spawned after this check starts on the fully installed state.
+            // Every step above is complete on every online CPU. The exclusion
+            // kept any user task from becoming runnable meanwhile; check that
+            // it did, then admit the deferred tasks onto the installed state.
             core::sync::atomic::fence(Ordering::SeqCst);
             assert!(
-                narf_scheduler::user_tasks_spawned() == spawned,
-                "a user task was spawned during instruction interceptor installation"
+                narf_scheduler::user_tasks_admitted() == admitted,
+                "a user task was admitted during instruction interceptor installation"
             );
+            drop(exclusion);
             Ok(())
         }
         Err(_) => {

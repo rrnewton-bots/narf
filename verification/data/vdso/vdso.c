@@ -11,9 +11,12 @@
 //
 // When the kernel publishes VVAR_CLOCK_MODE_SYSCALL (a timestamp instruction
 // interceptor is installed), every clock entry point issues its syscall
-// instead of reading the counter, like Linux's VDSO_CLOCKMODE_NONE. An
-// interposing tool then sees each guest clock read as a syscall it can
-// virtualize, rather than as a counter read converted with the host scale.
+// instead of reading the counter, like Linux's VDSO_CLOCKMODE_NONE, and
+// getcpu issues getcpu(2) instead of reading TSC_AUX with RDTSCP. An
+// interposing tool then sees each guest clock or CPU read as a syscall it can
+// virtualize, rather than as a counter read converted with the host scale or
+// the physical CPU number. Reverie's ptrace backend likewise replaces all
+// five vDSO entry points with their syscalls.
 //
 // The vvar page is mapped immediately before this object, so it lives at
 // `__ehdr_start - 4096` (a hidden, PC-relative reference — no GOT, no
@@ -56,10 +59,14 @@ struct vdso_timeval {
 extern const char __ehdr_start[] __attribute__((visibility("hidden")));
 #define VVAR ((const volatile struct vvar *)(__ehdr_start - 4096))
 
+// An ordered counter read, as Linux's rdtsc_ordered(): LFENCE keeps RDTSC
+// from executing before the preceding vvar loads, so the counter value belongs
+// to the snapshot the seqlock validates. The "memory" clobber alone orders
+// only the compiler.
 static inline uint64_t read_cycles(void) {
 #if defined(__x86_64__)
     uint32_t lo, hi;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi)::"memory");
+    __asm__ __volatile__("lfence\n\trdtsc" : "=a"(lo), "=d"(hi)::"memory");
     return ((uint64_t)hi << 32) | lo;
 #elif defined(__aarch64__)
     uint64_t v;
@@ -199,6 +206,14 @@ static int impl_clock_getres(int clk, struct vdso_timespec *res) {
 }
 
 static int impl_getcpu(unsigned *cpu, unsigned *node) {
+    // Under timestamp interception RDTSCP would expose the physical CPU
+    // number without the tool seeing a getcpu request, so every form is the
+    // syscall, as for the clocks. The mode is sticky and is published before
+    // any user task can run, so no seqlock snapshot is needed to read it.
+    const volatile struct vvar *vv = VVAR;
+    if (__atomic_load_n(&vv->clock_mode, __ATOMIC_ACQUIRE) != VVAR_CLOCK_MODE_COUNTER) {
+        return (int)vdso_syscall2(SYS_getcpu, (long)cpu, (long)node);
+    }
     if (!cpu && !node) {
         return 0;
     }

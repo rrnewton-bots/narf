@@ -156,17 +156,19 @@ pub fn update_wall_offset(offset_ns: i64) {
     }
 }
 
-/// Make every vDSO clock entry point issue its syscall from now on.
+/// Make every vDSO clock entry point, and `getcpu`, issue its syscall from
+/// now on.
 ///
 /// Installing a timestamp instruction interceptor calls this before arming
 /// the trap, so a tool sees each guest clock read as a `clock_gettime`,
 /// `gettimeofday` or `time` syscall rather than as a counter read that the
-/// vDSO converts with the host scale. The mode is sticky, like the trap
-/// request, and is published under the vvar seqlock. Installation runs only
-/// while no user task exists, so no vDSO call is in flight across the switch;
-/// the vDSO also reads the counter inside its seqlock read section, so a
-/// counter read that follows the publication belongs to a snapshot that
-/// retries.
+/// vDSO converts with the host scale, and each CPU query as `getcpu` rather
+/// than an `RDTSCP` that reveals the physical CPU. The mode is sticky, like
+/// the trap request, and is published under the vvar seqlock. Installation
+/// runs only while no user task is runnable, so no vDSO call is in flight
+/// across the switch; the vDSO also reads the counter inside its seqlock read
+/// section, so a counter read that follows the publication belongs to a
+/// snapshot that retries.
 pub fn route_clocks_through_syscalls() {
     set_clock_mode(CLOCK_MODE_SYSCALL);
 }
@@ -181,6 +183,14 @@ pub fn clocks_route_through_syscalls() -> bool {
 #[cfg(feature = "verification-test-reset")]
 pub(crate) fn __test_restore_counter_clocks() {
     set_clock_mode(CLOCK_MODE_COUNTER);
+}
+
+/// Restore the counter fast path while a timestamp interceptor stays
+/// installed, so a verification smoke can trap the vDSO's own counter reads.
+#[cfg(feature = "verification-test-reset")]
+#[doc(hidden)]
+pub fn __verification_restore_counter_clocks() {
+    __test_restore_counter_clocks();
 }
 
 fn set_clock_mode(mode: u32) {
