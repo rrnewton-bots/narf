@@ -588,10 +588,18 @@ pub fn barrier_serviced_count() -> u64 {
 #[cfg(test)]
 mod nested_service_tests {
     use super::*;
+    use crate::percpu::host_test_pin_cpu;
     use core::sync::atomic::AtomicUsize;
 
-    // The host build reports CPU 0 for every thread, so each scenario uses
-    // its own source lanes and counters.
+    // Host threads all report CPU 0 unless pinned, and other narf-lib tests
+    // reach `service_pending_barriers` on CPU 0 through the lock-spin hook.
+    // Each scenario therefore pins its thread to a CPU lane of its own and
+    // uses its own source lanes and counters, so parallel `cargo test` cannot
+    // interleave two scenarios in one inbox or one action slot.
+    const NESTED_CPU: usize = MAX_CPUS - 1;
+    const INLINE_CPU: usize = MAX_CPUS - 2;
+    const ISOLATION_CPU: usize = MAX_CPUS - 3;
+
     static INNER_RUNS: AtomicUsize = AtomicUsize::new(0);
     static INNER_SAW_OUTER_ACK: AtomicBool = AtomicBool::new(false);
     static NESTED_LEFT_PENDING: AtomicBool = AtomicBool::new(false);
@@ -600,7 +608,7 @@ mod nested_service_tests {
 
     fn inner_action() {
         INNER_SAW_OUTER_ACK.store(
-            BARRIER_ACKED[2].load(Ordering::Acquire) & 1 != 0,
+            BARRIER_ACKED[2].load(Ordering::Acquire) & (1 << NESTED_CPU) != 0,
             Ordering::Release,
         );
         INNER_RUNS.fetch_add(1, Ordering::Relaxed);
@@ -610,26 +618,27 @@ mod nested_service_tests {
     /// the service routine after source 1 has published its own action.
     fn outer_action() {
         BARRIER_ACTION[1].store(inner_action as usize, Ordering::Release);
-        BARRIER_PENDING[0].fetch_or(1 << 1, Ordering::Release);
+        BARRIER_PENDING[NESTED_CPU].fetch_or(1 << 1, Ordering::Release);
         service_pending_barriers();
         NESTED_LEFT_PENDING.store(
-            BARRIER_PENDING[0].load(Ordering::Acquire) & (1 << 1) != 0
+            BARRIER_PENDING[NESTED_CPU].load(Ordering::Acquire) & (1 << 1) != 0
                 && INNER_RUNS.load(Ordering::Relaxed) == 0,
             Ordering::Release,
         );
         NESTED_LEFT_UNACKED.store(
-            BARRIER_ACKED[1].load(Ordering::Acquire) == 0,
+            BARRIER_ACKED[1].load(Ordering::Acquire) & (1 << NESTED_CPU) == 0,
             Ordering::Release,
         );
     }
 
     #[test]
     fn service_inside_a_serviced_action_defers_then_drains_before_returning() {
-        assert_eq!(crate::percpu::current_cpu(), 0);
+        let _pin = host_test_pin_cpu(NESTED_CPU);
+        assert_eq!(crate::percpu::current_cpu(), NESTED_CPU);
         BARRIER_ACKED[1].store(0, Ordering::Relaxed);
         BARRIER_ACKED[2].store(0, Ordering::Relaxed);
         BARRIER_ACTION[2].store(outer_action as usize, Ordering::Release);
-        BARRIER_PENDING[0].fetch_or(1 << 2, Ordering::Release);
+        BARRIER_PENDING[NESTED_CPU].fetch_or(1 << 2, Ordering::Release);
 
         service_pending_barriers();
 
@@ -650,10 +659,19 @@ mod nested_service_tests {
             INNER_SAW_OUTER_ACK.load(Ordering::Acquire),
             "deferred action ran before the outer ack"
         );
-        assert_eq!(BARRIER_ACKED[2].load(Ordering::Acquire) & 1, 1);
-        assert_eq!(BARRIER_ACKED[1].load(Ordering::Acquire) & 1, 1);
-        assert_eq!(BARRIER_PENDING[0].load(Ordering::Acquire) & 0b110, 0);
-        assert!(!BARRIER_ACTION_ACTIVE[0].load(Ordering::Acquire));
+        assert_ne!(
+            BARRIER_ACKED[2].load(Ordering::Acquire) & (1 << NESTED_CPU),
+            0
+        );
+        assert_ne!(
+            BARRIER_ACKED[1].load(Ordering::Acquire) & (1 << NESTED_CPU),
+            0
+        );
+        assert_eq!(
+            BARRIER_PENDING[NESTED_CPU].load(Ordering::Acquire) & 0b110,
+            0
+        );
+        assert!(!BARRIER_ACTION_ACTIVE[NESTED_CPU].load(Ordering::Acquire));
         BARRIER_ACTION[1].store(0, Ordering::Release);
         BARRIER_ACTION[2].store(0, Ordering::Release);
     }
@@ -665,29 +683,86 @@ mod nested_service_tests {
     /// The inline local action of `remote_call`, which no service loop wraps.
     fn local_outer_action() {
         BARRIER_ACTION[3].store(local_inner_action as usize, Ordering::Release);
-        BARRIER_PENDING[0].fetch_or(1 << 3, Ordering::Release);
+        BARRIER_PENDING[INLINE_CPU].fetch_or(1 << 3, Ordering::Release);
         service_pending_barriers();
         assert_eq!(
             LOCAL_INNER_RUNS.load(Ordering::Relaxed),
             0,
             "nested action ran"
         );
-        assert_ne!(BARRIER_PENDING[0].load(Ordering::Acquire) & (1 << 3), 0);
+        assert_ne!(
+            BARRIER_PENDING[INLINE_CPU].load(Ordering::Acquire) & (1 << 3),
+            0
+        );
     }
 
     #[test]
     fn service_inside_an_inline_action_leaves_the_source_pending() {
-        assert_eq!(crate::percpu::current_cpu(), 0);
+        let _pin = host_test_pin_cpu(INLINE_CPU);
+        assert_eq!(crate::percpu::current_cpu(), INLINE_CPU);
         BARRIER_ACKED[3].store(0, Ordering::Relaxed);
         run_remote_action(local_outer_action);
         assert_eq!(LOCAL_INNER_RUNS.load(Ordering::Relaxed), 0);
-        assert!(!BARRIER_ACTION_ACTIVE[0].load(Ordering::Acquire));
+        assert!(!BARRIER_ACTION_ACTIVE[INLINE_CPU].load(Ordering::Acquire));
 
         // The sender's acknowledgement spin (or the latched IPI) services the
         // inbox after the inline action; that runs the deferred action once.
         service_pending_barriers();
         assert_eq!(LOCAL_INNER_RUNS.load(Ordering::Relaxed), 1);
-        assert_eq!(BARRIER_ACKED[3].load(Ordering::Acquire) & 1, 1);
+        assert_ne!(
+            BARRIER_ACKED[3].load(Ordering::Acquire) & (1 << INLINE_CPU),
+            0
+        );
         BARRIER_ACTION[3].store(0, Ordering::Release);
+    }
+
+    static CPU0_ACTION_ENTERED: AtomicBool = AtomicBool::new(false);
+    static CPU0_ACTION_RELEASE: AtomicBool = AtomicBool::new(false);
+    static ISOLATED_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    fn cpu0_blocking_action() {
+        CPU0_ACTION_ENTERED.store(true, Ordering::Release);
+        while !CPU0_ACTION_RELEASE.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn isolated_action() {
+        ISOLATED_RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Another thread sits inside an action on the default CPU 0 for the whole
+    /// scenario. A pinned thread must still service its own inbox at once;
+    /// if the pin were ignored, the service would see CPU 0's action active
+    /// and defer, or `run_remote_action` would report recursion.
+    #[test]
+    fn a_pinned_scenario_is_isolated_from_an_action_running_on_cpu_zero() {
+        CPU0_ACTION_ENTERED.store(false, Ordering::Relaxed);
+        CPU0_ACTION_RELEASE.store(false, Ordering::Relaxed);
+        let holder = std::thread::spawn(|| {
+            assert_eq!(crate::percpu::current_cpu(), 0);
+            run_remote_action(cpu0_blocking_action);
+        });
+        while !CPU0_ACTION_ENTERED.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+
+        let outcome = std::panic::catch_unwind(|| {
+            let _pin = host_test_pin_cpu(ISOLATION_CPU);
+            BARRIER_ACKED[4].store(0, Ordering::Relaxed);
+            BARRIER_ACTION[4].store(isolated_action as usize, Ordering::Release);
+            BARRIER_PENDING[ISOLATION_CPU].fetch_or(1 << 4, Ordering::Release);
+            service_pending_barriers();
+            let runs = ISOLATED_RUNS.load(Ordering::Relaxed);
+            let acked = BARRIER_ACKED[4].load(Ordering::Acquire) & (1 << ISOLATION_CPU) != 0;
+            BARRIER_ACTION[4].store(0, Ordering::Release);
+            (runs, acked)
+        });
+
+        CPU0_ACTION_RELEASE.store(true, Ordering::Release);
+        holder.join().unwrap();
+        let (runs, acked) = outcome.unwrap();
+        assert_eq!(runs, 1, "pinned service deferred behind CPU 0's action");
+        assert!(acked, "pinned service did not acknowledge its source");
     }
 }
