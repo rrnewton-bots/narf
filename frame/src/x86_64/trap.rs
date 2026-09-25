@@ -1418,12 +1418,7 @@ pub extern "C" fn rust_trap_handler(frame: &mut TrapFrame) {
             )
         }
         .is_ok();
-        if copied
-            && opcode == [0x0f, 0x31]
-            && narf_userspace::instruction_interception_enabled(
-                narf_userspace::NondeterministicInstruction::Rdtsc,
-            )
-        {
+        if copied && opcode == [0x0f, 0x31] {
             let dispatched = narf_userspace::dispatch_instruction(
                 narf_userspace::NondeterministicInstruction::Rdtsc,
                 frame.rip,
@@ -1442,12 +1437,13 @@ pub extern "C" fn rust_trap_handler(frame: &mut TrapFrame) {
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => {}
-                Err(mismatch) => {
+                Err(error) => {
                     let _ = writeln!(
                         TrapWriter,
-                        "instruction interceptor result mismatch at rip={:#x}: expected={:?} actual={:?}",
-                        frame.rip, mismatch.expected, mismatch.actual
+                        "instruction interceptor failed closed at rip={:#x}: {:?}",
+                        frame.rip, error
                     );
+                    panic!("instruction interceptor failed closed");
                 }
             }
         }
