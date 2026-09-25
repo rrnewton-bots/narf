@@ -2487,7 +2487,7 @@ fn smoke_frame_x86_64_tss_rsp0_and_gs_base() -> TestResult {
 #[cfg(target_arch = "x86_64")]
 kernel_test!(smoke_frame_x86_64_tss_rsp0_and_gs_base);
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "kernel-test"))]
 fn smoke_frame_x86_64_int80_dispatches_through_global() -> TestResult {
     // End-to-end: install a global SyscallTable with a handler for
     // Syscall::Yield, fire `int 0x80` from kernel mode with
@@ -2601,10 +2601,10 @@ fn smoke_frame_x86_64_int80_dispatches_through_global() -> TestResult {
     }
     TestResult::Pass
 }
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "kernel-test"))]
 kernel_test!(smoke_frame_x86_64_int80_dispatches_through_global);
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "kernel-test"))]
 fn smoke_frame_aarch64_svc_dispatches_through_global() -> TestResult {
     // End-to-end: install a global SyscallTable with a handler for
     // Syscall::Yield, fire `svc #0` from kernel mode with x8 =
@@ -2725,7 +2725,7 @@ fn smoke_frame_aarch64_svc_dispatches_through_global() -> TestResult {
     }
     TestResult::Pass
 }
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "kernel-test"))]
 kernel_test!(smoke_frame_aarch64_svc_dispatches_through_global);
 
 // `smoke_userspace_syscall_dispatch_via_global` migrated to userspace/src/tests.rs (subsystem `"userspace"`).
@@ -3217,6 +3217,17 @@ mod aarch64_el0_preemption_e2e {
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+static RDTSC_ARMED_CPUS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+fn record_cpu_with_rdtsc_trap_armed() {
+    let cpu = narf_lib::percpu::current_cpu();
+    if cpu < 64 && narf_arch::x86_64::cr::cached_cr4() & narf_arch::x86_64::cr::CR4_TSD != 0 {
+        RDTSC_ARMED_CPUS.fetch_or(1u64 << cpu, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
 fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     // Enter real ring 3 and issue the MSR-driven `syscall` instruction with an
     // unknown raw number. The interceptor completes it with a magic value.
@@ -3229,9 +3240,9 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
         install_global, instruction::__verification_clear_instruction_interceptor,
         syscall::__verification_clear_global as __test_clear_global,
         try_install_instruction_interceptor, InstructionInterception, InstructionInterceptor,
-        InstructionInvocation, InstructionResult, NondeterministicInstruction, Syscall,
-        SyscallHandler, SyscallInterception, SyscallInterceptor, SyscallInvocation, SyscallReturn,
-        SyscallTable, TrapContext,
+        InstructionInvocation, InstructionResult, InstructionSubscriptions,
+        NondeterministicInstruction, Syscall, SyscallHandler, SyscallInterception,
+        SyscallInterceptor, SyscallInvocation, SyscallReturn, SyscallTable, TrapContext,
     };
 
     const SYSCALL_MAGIC: u64 = 0xA11CE;
@@ -3240,6 +3251,7 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     static SEEN_RDTSC_RESULT: AtomicU64 = AtomicU64::new(0);
     static FAST_ENTRIES: AtomicU64 = AtomicU64::new(0);
     static RDTSC_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static RDTSC_SUBSCRIPTION_CALLS: AtomicU64 = AtomicU64::new(0);
     static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
     static mut JMP: UserModeJmpBuf = UserModeJmpBuf {
         rbx: 0,
@@ -3265,9 +3277,12 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     }
 
     struct RdtscProbe;
-    impl InstructionInterceptor for RdtscProbe {
-        fn intercepts(&self, instruction: NondeterministicInstruction) -> bool {
-            instruction == NondeterministicInstruction::Rdtsc
+    // SAFETY: every callback uses only preallocated atomics and typed values;
+    // it does not allocate, park, lock, await, or re-enter guest execution.
+    unsafe impl InstructionInterceptor for RdtscProbe {
+        fn subscriptions(&self) -> InstructionSubscriptions {
+            RDTSC_SUBSCRIPTION_CALLS.fetch_add(1, Ordering::Relaxed);
+            InstructionSubscriptions::RDTSC
         }
 
         fn on_instruction_enter(
@@ -3323,6 +3338,7 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     SEEN_RDTSC_RESULT.store(0, Ordering::Relaxed);
     FAST_ENTRIES.store(0, Ordering::Relaxed);
     RDTSC_ENTRIES.store(0, Ordering::Relaxed);
+    RDTSC_SUBSCRIPTION_CALLS.store(0, Ordering::Relaxed);
     __test_clear_global();
     __verification_clear_instruction_interceptor();
 
@@ -3364,6 +3380,9 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
         if RDTSC_ENTRIES.load(Ordering::Acquire) != 1 {
             return TestResult::Fail("ring-3 RDTSC did not enter interceptor exactly once");
         }
+        if RDTSC_SUBSCRIPTION_CALLS.load(Ordering::Acquire) != 1 {
+            return TestResult::Fail("RDTSC subscription was not frozen exactly once at install");
+        }
         if SEEN_RDTSC_RESULT.load(Ordering::Acquire) != RDTSC_MAGIC {
             return TestResult::Fail("ring-3 RDTSC did not receive interceptor result");
         }
@@ -3381,6 +3400,16 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     install_global(table);
     if try_install_instruction_interceptor(alloc::boxed::Box::new(RdtscProbe)).is_err() {
         return TestResult::Fail("RDTSC interceptor installation failed");
+    }
+    let online_cpus = narf_lib::smp::online_bitmap();
+    RDTSC_ARMED_CPUS.store(0, Ordering::Release);
+    // SAFETY: the callback only reads the local cached CR4 value and updates a
+    // lock-free atomic bitmap. It allocates, blocks, awaits, and locks nowhere.
+    if !unsafe { narf_lib::smp::remote_call(online_cpus, record_cpu_with_rdtsc_trap_armed) } {
+        return TestResult::Fail("RDTSC post-install AP inspection rendezvous failed");
+    }
+    if RDTSC_ARMED_CPUS.load(Ordering::Acquire) & online_cpus != online_cpus {
+        return TestResult::Fail("RDTSC install returned before every online CPU armed CR4.TSD");
     }
 
     // SAFETY: the test owns this fresh user address space until longjmp.
