@@ -3226,14 +3226,20 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
-        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        install_global, instruction::__verification_clear_instruction_interceptor,
+        syscall::__verification_clear_global as __test_clear_global,
+        try_install_instruction_interceptor, InstructionInterception, InstructionInterceptor,
+        InstructionInvocation, InstructionResult, NondeterministicInstruction, Syscall,
         SyscallHandler, SyscallInterception, SyscallInterceptor, SyscallInvocation, SyscallReturn,
         SyscallTable, TrapContext,
     };
 
-    const MAGIC: u64 = 0xA11CE;
-    static SEEN_RESULT: AtomicU64 = AtomicU64::new(0);
+    const SYSCALL_MAGIC: u64 = 0xA11CE;
+    const RDTSC_MAGIC: u64 = 0x1234_5678_9ABC_DEF0;
+    static SEEN_SYSCALL_RESULT: AtomicU64 = AtomicU64::new(0);
+    static SEEN_RDTSC_RESULT: AtomicU64 = AtomicU64::new(0);
     static FAST_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static RDTSC_ENTRIES: AtomicU64 = AtomicU64::new(0);
     static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
     static mut JMP: UserModeJmpBuf = UserModeJmpBuf {
         rbx: 0,
@@ -3251,9 +3257,43 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
         fn on_syscall_enter(&self, invocation: &SyscallInvocation) -> SyscallInterception {
             if invocation.raw_number == 0x3fff && invocation.syscall.is_none() {
                 FAST_ENTRIES.fetch_add(1, Ordering::Relaxed);
-                SyscallInterception::Complete(SyscallReturn::ok(MAGIC))
+                SyscallInterception::Complete(SyscallReturn::ok(SYSCALL_MAGIC))
             } else {
                 SyscallInterception::Continue
+            }
+        }
+    }
+
+    struct RdtscProbe;
+    impl InstructionInterceptor for RdtscProbe {
+        fn intercepts(&self, instruction: NondeterministicInstruction) -> bool {
+            instruction == NondeterministicInstruction::Rdtsc
+        }
+
+        fn on_instruction_enter(
+            &self,
+            invocation: &InstructionInvocation,
+        ) -> InstructionInterception {
+            if invocation.instruction == NondeterministicInstruction::Rdtsc {
+                RDTSC_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                InstructionInterception::Complete(InstructionResult::Rdtsc {
+                    value: RDTSC_MAGIC - 1,
+                })
+            } else {
+                InstructionInterception::Continue
+            }
+        }
+
+        fn on_instruction_return(
+            &self,
+            _invocation: &InstructionInvocation,
+            result: InstructionResult,
+        ) -> InstructionResult {
+            match result {
+                InstructionResult::Rdtsc { value } => InstructionResult::Rdtsc {
+                    value: value.wrapping_add(1),
+                },
+                other => other,
             }
         }
     }
@@ -3272,15 +3312,19 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
     struct UnwindHandler;
     impl SyscallHandler for UnwindHandler {
         fn handle(&self, ctx: &mut dyn TrapContext) {
-            SEEN_RESULT.store(ctx.args().arg0, Ordering::Release);
+            SEEN_SYSCALL_RESULT.store(ctx.args().arg0, Ordering::Release);
+            SEEN_RDTSC_RESULT.store(ctx.args().arg1, Ordering::Release);
             let _ =
                 ctx.redirect_to_kernel(resume_trampoline as usize as u64, 0xFFFF_FFFF_FFFF_FFF0);
         }
     }
 
-    SEEN_RESULT.store(0, Ordering::Relaxed);
+    SEEN_SYSCALL_RESULT.store(0, Ordering::Relaxed);
+    SEEN_RDTSC_RESULT.store(0, Ordering::Relaxed);
     FAST_ENTRIES.store(0, Ordering::Relaxed);
+    RDTSC_ENTRIES.store(0, Ordering::Relaxed);
     __test_clear_global();
+    __verification_clear_instruction_interceptor();
 
     let original_cr3: u64;
     // SAFETY: read the active kernel address space so the non-local return can
@@ -3310,11 +3354,18 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
         __test_clear_global();
+        __verification_clear_instruction_interceptor();
         if FAST_ENTRIES.load(Ordering::Acquire) != 1 {
             return TestResult::Fail("ring-3 syscall did not enter interceptor exactly once");
         }
-        if SEEN_RESULT.load(Ordering::Acquire) != MAGIC {
+        if SEEN_SYSCALL_RESULT.load(Ordering::Acquire) != SYSCALL_MAGIC {
             return TestResult::Fail("ring-3 syscall did not receive interceptor result");
+        }
+        if RDTSC_ENTRIES.load(Ordering::Acquire) != 1 {
+            return TestResult::Fail("ring-3 RDTSC did not enter interceptor exactly once");
+        }
+        if SEEN_RDTSC_RESULT.load(Ordering::Acquire) != RDTSC_MAGIC {
+            return TestResult::Fail("ring-3 RDTSC did not receive interceptor result");
         }
         return TestResult::Pass;
     }
@@ -3328,6 +3379,9 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
         return TestResult::Fail("fast-syscall interceptor installation failed");
     }
     install_global(table);
+    if try_install_instruction_interceptor(alloc::boxed::Box::new(RdtscProbe)).is_err() {
+        return TestResult::Fail("RDTSC interceptor installation failed");
+    }
 
     // SAFETY: the test owns this fresh user address space until longjmp.
     let address_space = match unsafe { AddressSpace::new_for_user() } {
@@ -3361,11 +3415,13 @@ fn smoke_frame_x86_64_user_mode_fast_syscall_interceptor() -> TestResult {
         })
         .ok();
 
-    // mov eax,0x3fff; syscall; mov rdi,rax; mov eax,Sleep; int 0x80; ud2
+    // mov eax,0x3fff; syscall; mov rdi,rax; rdtsc; combine edx:eax into
+    // rsi; mov eax,Sleep; int 0x80; ud2
     let sleep = Syscall::Sleep.raw().to_le_bytes();
-    let code: [u8; 19] = [
-        0xB8, 0xFF, 0x3F, 0x00, 0x00, 0x0F, 0x05, 0x48, 0x89, 0xC7, 0xB8, sleep[0], sleep[1],
-        sleep[2], sleep[3], 0xCD, 0x80, 0x0F, 0x0B,
+    let code: [u8; 31] = [
+        0xB8, 0xFF, 0x3F, 0x00, 0x00, 0x0F, 0x05, 0x48, 0x89, 0xC7, 0x0F, 0x31, 0x48, 0xC1, 0xE2,
+        0x20, 0x48, 0x09, 0xD0, 0x48, 0x89, 0xC6, 0xB8, sleep[0], sleep[1], sleep[2], sleep[3],
+        0xCD, 0x80, 0x0F, 0x0B,
     ];
     // SAFETY: code_frame is exclusively owned and the copy fits one page.
     unsafe {
