@@ -42,14 +42,16 @@ pointer. It then invokes `on_syscall_enter` with the immutable snapshot and a
 borrowed `NativeSyscallTransition`. Its first `execute_original()` bypasses
 interception, runs the original native handler synchronously, and returns either
 `Returned(SyscallReturn)` or `ContextManaged`; every later original call returns
-`NativeSyscallAlreadyExecuted` without running the handler. Its
+`NativeSyscallOriginalError::AlreadyExecuted` without running the handler. Its
 `execute_injected(NativeSyscallRequest)` presents the request's exact wire
 number and six arguments to the native table, bypasses interception, returns the
 same typed outcome, and may be called repeatedly for distinct or repeated
 injections until any transition becomes context-managed. That terminal outcome
 is then sticky: later injection attempts return `ContextManaged` without
-executing. Injected normal returns do not consume the original transition or
-write the live guest return registers. If the interceptor returns `Continue`
+executing, and an original not yet executed returns
+`NativeSyscallOriginalError::ContextManaged` because the live context is no
+longer available. Injected normal returns do not consume the original
+transition or write the live guest return registers. If the interceptor returns `Continue`
 without having executed the original, the dispatcher executes it once. If it
 already executed the original, `Continue` consumes that saved outcome rather
 than executing twice. `Complete` suppresses an unexecuted original or replaces
