@@ -51,9 +51,10 @@ Global publication is also one-shot. `try_install_global` uses atomic
 null-to-table publication, returns ownership of a rejected second table, and
 does not change the table or interceptor identity already observed by trap
 dispatchers. `install_global` is the boot convenience wrapper and panics on a
-duplicate. Production has no removal or replacement operation; the test-only
-reset retires without reclaiming the old allocation because a concurrent
-dispatcher may already hold its pointer.
+duplicate. The production public interface has no removal or replacement
+operation. The crate-private test reset and explicitly feature-gated
+out-of-crate verification reset retire without reclaiming the old allocation
+because a concurrent dispatcher may already hold its pointer.
 
 On the x86-64 `syscall`-instruction path the required order is ptrace entry
 stop, interceptor entry, zero-or-one native handler invocation, the matching

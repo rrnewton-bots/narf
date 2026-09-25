@@ -4740,6 +4740,12 @@ pub fn install_global(table: SyscallTable) {
 /// The compare-and-exchange makes concurrent publication fail closed without
 /// changing the identity observed by dispatchers. Ownership of a rejected
 /// table is returned to the caller.
+///
+/// The test reset is deliberately not part of the production public API:
+///
+/// ```compile_fail
+/// narf_userspace::syscall::__test_clear_global();
+/// ```
 pub fn try_install_global(table: SyscallTable) -> Result<(), SyscallTable> {
     let ptr = Box::into_raw(Box::new(table));
     match GLOBAL_TABLE.compare_exchange(
@@ -5408,7 +5414,17 @@ mod interception_kernel_tests {
 // ── Test stubs ──────────────────────────────────────────────────────
 
 #[doc(hidden)]
-pub fn __test_clear_global() {
+pub(crate) fn __test_clear_global() {
+    clear_global_for_tests();
+}
+
+#[cfg(feature = "verification-test-reset")]
+#[doc(hidden)]
+pub fn __verification_clear_global() {
+    clear_global_for_tests();
+}
+
+fn clear_global_for_tests() {
     // Tests reset the singleton between isolated cases. A dispatcher may have
     // loaded the old pointer immediately before this swap, so reclamation here
     // would be a use-after-free. Deliberately leak the retired test table; the
