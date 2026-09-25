@@ -178,7 +178,7 @@ pub use process::{
 pub use syscall::{
     install_global, kernel_syscall_entry, kernel_syscall_entry_plain,
     kernel_syscall_entry_plain_with_state, syscall_number, syscall_pack, syscall_version,
-    try_install_global, FnHandler, NativeSyscallAlreadyExecuted, NativeSyscallOutcome,
+    try_install_global, FnHandler, NativeSyscallOriginalError, NativeSyscallOutcome,
     NativeSyscallRequest, NativeSyscallTransition, RawFnHandler, RawSyscallHandler,
     SigDeliveryParams, Syscall, SyscallArgs, SyscallEntry, SyscallHandler, SyscallInterception,
     SyscallInterceptor, SyscallInvocation, SyscallReturn, SyscallTable, TrapContext, SA_NODEFER,
