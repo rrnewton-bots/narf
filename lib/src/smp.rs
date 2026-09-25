@@ -334,6 +334,11 @@ static BARRIER_ACTION: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) };
 /// could deadlock by recursively acquiring the same non-reentrant lock.
 static BARRIER_ACTION_ACTIVE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
+/// Set when [`service_pending_barriers`] was called while this CPU was
+/// executing an action and returned without claiming anything. The service
+/// loop that ran the action rechecks the inbox before it returns.
+static BARRIER_DEFERRED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
 /// Serializes nested/concurrent publishers on one CPU, and (being
 /// IRQ-safe) keeps `current_cpu()` stable for the lifetime of the lane.
 static BARRIER_OUTGOING: [crate::sync::IrqSafeSpinLock<()>; MAX_CPUS] =
@@ -500,12 +505,39 @@ unsafe fn remote_call_inner(targets: u64, action: Option<fn()>) -> bool {
 /// being left — so the barrier the source asked for did happen, after its
 /// request was published. This is the same property Linux leans on when it
 /// skips the current CPU in `membarrier_global_expedited`.
+///
+/// A call made while this CPU is executing an action (from the lock spin path
+/// inside the action, or from the barrier IPI if the action was reached from
+/// a spin that runs with IRQs enabled) claims nothing and returns. Running a
+/// second action there would nest actions, which [`run_remote_action`]
+/// forbids. The deferred sources keep their `BARRIER_PENDING` bits, and
+/// `BARRIER_DEFERRED` makes the loop that ran the action claim the inbox
+/// again before returning, so a deferral that consumed the IPI strands no
+/// sender. An action run inline by [`remote_call`] has no such loop; it runs
+/// under the sender's IRQ-masked outgoing lock, so the IPI stays latched and
+/// the sender's acknowledgement spin also drains the inbox. The deferral
+/// cannot deadlock the action because [`remote_call`] forbids an action from
+/// taking a lock held by any sender.
 pub fn service_pending_barriers() {
     let target = crate::percpu::current_cpu().min(MAX_CPUS - 1);
-    let sources = BARRIER_PENDING[target].swap(0, Ordering::AcqRel);
-    if sources == 0 {
+    if BARRIER_ACTION_ACTIVE[target].load(Ordering::Acquire) {
+        BARRIER_DEFERRED[target].store(true, Ordering::Release);
         return;
     }
+    loop {
+        let sources = BARRIER_PENDING[target].swap(0, Ordering::AcqRel);
+        if sources == 0 {
+            return;
+        }
+        service_claimed_barriers(target, sources);
+        if !BARRIER_DEFERRED[target].swap(false, Ordering::AcqRel) {
+            return;
+        }
+    }
+}
+
+/// Run and acknowledge one claimed batch of `sources` on `target`.
+fn service_claimed_barriers(target: usize, sources: u64) {
     BARRIER_SERVICED.fetch_add(1, Ordering::Relaxed);
 
     let mut remaining = sources;
@@ -551,4 +583,111 @@ pub fn barrier_sent_count() -> u64 {
 /// Barrier handler invocations that found work, since boot.
 pub fn barrier_serviced_count() -> u64 {
     BARRIER_SERVICED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod nested_service_tests {
+    use super::*;
+    use core::sync::atomic::AtomicUsize;
+
+    // The host build reports CPU 0 for every thread, so each scenario uses
+    // its own source lanes and counters.
+    static INNER_RUNS: AtomicUsize = AtomicUsize::new(0);
+    static INNER_SAW_OUTER_ACK: AtomicBool = AtomicBool::new(false);
+    static NESTED_LEFT_PENDING: AtomicBool = AtomicBool::new(false);
+    static NESTED_LEFT_UNACKED: AtomicBool = AtomicBool::new(false);
+    static LOCAL_INNER_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    fn inner_action() {
+        INNER_SAW_OUTER_ACK.store(
+            BARRIER_ACKED[2].load(Ordering::Acquire) & 1 != 0,
+            Ordering::Release,
+        );
+        INNER_RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An action from source 2 that, like a lock spin inside the action, calls
+    /// the service routine after source 1 has published its own action.
+    fn outer_action() {
+        BARRIER_ACTION[1].store(inner_action as usize, Ordering::Release);
+        BARRIER_PENDING[0].fetch_or(1 << 1, Ordering::Release);
+        service_pending_barriers();
+        NESTED_LEFT_PENDING.store(
+            BARRIER_PENDING[0].load(Ordering::Acquire) & (1 << 1) != 0
+                && INNER_RUNS.load(Ordering::Relaxed) == 0,
+            Ordering::Release,
+        );
+        NESTED_LEFT_UNACKED.store(
+            BARRIER_ACKED[1].load(Ordering::Acquire) == 0,
+            Ordering::Release,
+        );
+    }
+
+    #[test]
+    fn service_inside_a_serviced_action_defers_then_drains_before_returning() {
+        assert_eq!(crate::percpu::current_cpu(), 0);
+        BARRIER_ACKED[1].store(0, Ordering::Relaxed);
+        BARRIER_ACKED[2].store(0, Ordering::Relaxed);
+        BARRIER_ACTION[2].store(outer_action as usize, Ordering::Release);
+        BARRIER_PENDING[0].fetch_or(1 << 2, Ordering::Release);
+
+        service_pending_barriers();
+
+        assert!(
+            NESTED_LEFT_PENDING.load(Ordering::Acquire),
+            "nested service claimed or ran a source"
+        );
+        assert!(
+            NESTED_LEFT_UNACKED.load(Ordering::Acquire),
+            "nested service acknowledged a source"
+        );
+        assert_eq!(
+            INNER_RUNS.load(Ordering::Relaxed),
+            1,
+            "deferred source was not drained before the outer service returned"
+        );
+        assert!(
+            INNER_SAW_OUTER_ACK.load(Ordering::Acquire),
+            "deferred action ran before the outer ack"
+        );
+        assert_eq!(BARRIER_ACKED[2].load(Ordering::Acquire) & 1, 1);
+        assert_eq!(BARRIER_ACKED[1].load(Ordering::Acquire) & 1, 1);
+        assert_eq!(BARRIER_PENDING[0].load(Ordering::Acquire) & 0b110, 0);
+        assert!(!BARRIER_ACTION_ACTIVE[0].load(Ordering::Acquire));
+        BARRIER_ACTION[1].store(0, Ordering::Release);
+        BARRIER_ACTION[2].store(0, Ordering::Release);
+    }
+
+    fn local_inner_action() {
+        LOCAL_INNER_RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The inline local action of `remote_call`, which no service loop wraps.
+    fn local_outer_action() {
+        BARRIER_ACTION[3].store(local_inner_action as usize, Ordering::Release);
+        BARRIER_PENDING[0].fetch_or(1 << 3, Ordering::Release);
+        service_pending_barriers();
+        assert_eq!(
+            LOCAL_INNER_RUNS.load(Ordering::Relaxed),
+            0,
+            "nested action ran"
+        );
+        assert_ne!(BARRIER_PENDING[0].load(Ordering::Acquire) & (1 << 3), 0);
+    }
+
+    #[test]
+    fn service_inside_an_inline_action_leaves_the_source_pending() {
+        assert_eq!(crate::percpu::current_cpu(), 0);
+        BARRIER_ACKED[3].store(0, Ordering::Relaxed);
+        run_remote_action(local_outer_action);
+        assert_eq!(LOCAL_INNER_RUNS.load(Ordering::Relaxed), 0);
+        assert!(!BARRIER_ACTION_ACTIVE[0].load(Ordering::Acquire));
+
+        // The sender's acknowledgement spin (or the latched IPI) services the
+        // inbox after the inline action; that runs the deferred action once.
+        service_pending_barriers();
+        assert_eq!(LOCAL_INNER_RUNS.load(Ordering::Relaxed), 1);
+        assert_eq!(BARRIER_ACKED[3].load(Ordering::Acquire) & 1, 1);
+        BARRIER_ACTION[3].store(0, Ordering::Release);
+    }
 }
