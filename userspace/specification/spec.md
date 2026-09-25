@@ -39,12 +39,33 @@ identity. For every known or unknown wire number, the dispatcher snapshots the
 raw number (including version bits), canonical variant when one exists, six
 register arguments, task identity, user instruction pointer, and user stack
 pointer. It then invokes `on_syscall_enter`, executes the native handler at
-most once unless entry supplied a complete result, and invokes
-`on_syscall_exit`. Exit observes either an exact `SyscallReturn` or the typed
-`ContextManaged` state used for a park/redirection; it may replace a normal
-return but cannot silently turn a context-managed path into a fabricated native
-completion. Unknown syscalls traverse the same layer and retain Linux
+most once unless entry supplied a complete result, and invokes exactly one of
+`on_syscall_return` or `on_syscall_context_managed`. Interceptors receive only
+the immutable invocation snapshot, never the mutable trap context. A return
+callback may replace its exact `SyscallReturn`; the context-managed callback is
+observation-only, so a park/redirection cannot become a fabricated completion.
+Unknown syscalls traverse the same layer and retain Linux
 `-ENOSYS`/NARF `InvalidOp` unless the interceptor explicitly replaces them.
+
+Global publication is also one-shot. `try_install_global` uses atomic
+null-to-table publication, returns ownership of a rejected second table, and
+does not change the table or interceptor identity already observed by trap
+dispatchers. `install_global` is the boot convenience wrapper and panics on a
+duplicate. Production has no removal or replacement operation; the test-only
+reset retires without reclaiming the old allocation because a concurrent
+dispatcher may already hold its pointer.
+
+On the x86-64 `syscall`-instruction path the required order is ptrace entry
+stop, interceptor entry, zero-or-one native handler invocation, the matching
+typed interceptor completion callback, ptrace exit stop for a genuinely
+completed call, pending timer/signal delivery, and the syscall-exit reschedule
+check. Known and unknown wire numbers share that outer lifecycle. A handler
+that rewinds the instruction pointer for re-execution remains context-managed
+and does not produce a ptrace exit stop. On the common trap path, kernel-time
+accounting brackets dispatch, read/write I/O accounting observes the final
+possibly replaced return, and architecture return hooks retain responsibility
+for signal delivery. Interception does not replace any of those kernel
+lifecycle owners.
 
 The interceptor object is shared directly by dispatcher calls on every CPU and
 must synchronize its own mutable state and filter task identities itself. Its
