@@ -5520,6 +5520,9 @@ fn smoke_remote_call_completes_while_target_waits_for_shootdown_ack() -> TestRes
     if !observed {
         return TestResult::Fail("the AP's shootdown request was never seen pending");
     }
+    // Printed, not asserted: the test requires the cycle to be broken, not
+    // which spin broke it, so the h1-removed negative control ties it to
+    // remote_call's servicing.
     let _ = writeln!(
         Writer,
         "    shootdowns acknowledged inside the call: {}",

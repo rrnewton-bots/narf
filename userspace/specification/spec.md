@@ -135,7 +135,9 @@ closed it, and keeps the gate closed until every step has completed on every
 online CPU, including the call to the subscription method. A user task spawned
 meanwhile, by any CPU or by the interceptor itself, is created and counted live
 but is placed on its run queue only when the gate reopens; the spawner never
-waits. The gate's closed flag and the live count are each written before the
+waits. Reopening enqueues the deferred tasks in the order they were deferred;
+a spawn that races the reopening may be enqueued before them, as concurrent
+spawns on different CPUs already are ordered by host timing. The gate's closed flag and the live count are each written before the
 other is read, both sequentially consistent, so a concurrent spawn is either
 seen live and refuses installation or sees the gate closed and defers. The
 installer still stops the kernel if the monotonic count of admitted user tasks
@@ -143,7 +145,11 @@ changed during the window, because publication cannot be rolled back.
 Installation linearizes at its successful return: no user task is runnable
 from the gate's closing until then, and every user task admitted afterwards,
 including the deferred ones, sees the syscall clock mode and first enters user mode on a CPU already armed, by the
-rendezvous or by one of the activation points above. Eligibility is
+rendezvous or by one of the activation points above. Whether a spawn that
+races installation defers the task or makes installation refuse is itself host
+timing, and a refused installation leaves that task running without the tool:
+a deterministic caller installs before creating any guest and treats a refusal
+as fatal. Eligibility is
 kernel-global rather than per process: once installed, every ring-3 timestamp
 instruction on every CPU traps, and a tool that virtualizes only some
 processes filters by the task identity in the invocation.

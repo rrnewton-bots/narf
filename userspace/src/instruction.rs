@@ -176,7 +176,10 @@ static IN_INSTRUCTION_CALLBACK: [AtomicBool; narf_lib::percpu::MAX_CPUS] =
 ///
 /// Returns the interceptor when another one is already published, when a user
 /// task is live or another admission exclusion is held, or when a multi-CPU
-/// timestamp trap has no SMP rendezvous. Schedulers must additionally call
+/// timestamp trap has no SMP rendezvous. Whether a spawn racing this call is
+/// deferred or makes it refuse depends on host timing, and after a refusal
+/// that task runs uninstrumented; a deterministic caller installs before
+/// creating any guest and treats an `Err` as fatal. Schedulers must additionally call
 /// [`activate_current_cpu_instruction_interception`] before a newly-online CPU
 /// can return an instrumented task to user mode.
 pub fn try_install_instruction_interceptor(
