@@ -1796,6 +1796,8 @@ dependencies = [
  "narf-userspace",
  "narf-verification",
  "narf-wireless",
+ "reverie-narf-adapter",
+ "reverie-narf-core",
 ]
 
 [[package]]
@@ -2400,6 +2402,21 @@ name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+
+[[package]]
+name = "reverie-narf-adapter"
+version = "0.0.0"
+dependencies = [
+ "narf-kernel-test",
+ "narf-lib",
+ "narf-userspace",
+ "reverie-narf-core",
+]
+
+[[package]]
+name = "reverie-narf-core"
+version = "0.2.0"
+source = "git+https://github.com/rrnewton/reverie?rev=08a70a2e1562de1602d20e8bf1f6b2238aec7ee5#08a70a2e1562de1602d20e8bf1f6b2238aec7ee5"
 
 [[package]]
 name = "rustc_version"

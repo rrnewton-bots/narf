@@ -100,6 +100,8 @@ narf-bpf-idle        = { path = "../bpf-idle", optional = true }
 narf-bpf-leds        = { path = "../bpf-leds", optional = true }
 narf-kernel-test     = { path = "../verification/kernel-test" }
 narf-verification    = { path = "../verification", optional = true }
+reverie-narf-adapter = { path = "../reverie-narf-adapter", optional = true }
+reverie-narf-core = { git = "https://github.com/rrnewton/reverie", rev = "08a70a2e1562de1602d20e8bf1f6b2238aec7ee5", optional = true }
 
 [features]
 # Profiling: emit a `perf stat`-style line (per-CPU narf_lib::perf software
@@ -341,6 +343,9 @@ narf-libc-validate = ["user-mode-e2e", "narf-verification/narf-libc-validate"]
 # surface is unconditional now, so boot-init only needs narf-verification
 # for the init/shell ELF build path.
 boot-init = ["dep:narf-verification", "narf-verification/boot-init"]
+# POC-only installation of the general Reverie/Narf adapter on the production
+# syscall table. The adapter and Tool state remain direct kernel references.
+reverie-narf-poc = ["dep:reverie-narf-adapter", "dep:reverie-narf-core"]
 
 [lints]
 workspace = true

@@ -35,6 +35,10 @@ extern crate narf_hid as _;
 extern crate narf_pinctrl as _;
 extern crate narf_security as _;
 
+#[cfg(feature = "reverie-narf-poc")]
+#[path = "reverie_narf_poc.rs"]
+mod reverie_narf_poc;
+
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
@@ -4736,6 +4740,12 @@ fn boot_userspace_init() {
     // Syscall table.
     let mut t = SyscallTable::new();
     install_core_syscalls(&mut t);
+    #[cfg(feature = "reverie-narf-poc")]
+    if t.install_interceptor(alloc::boxed::Box::new(reverie_narf_poc::interceptor()))
+        .is_err()
+    {
+        panic!("fresh syscall table rejected the Reverie/Narf interceptor");
+    }
     install_global(t);
 
     // The handlers reach `current_task_id()` then look up its
