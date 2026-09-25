@@ -67,6 +67,13 @@ fn main() {
     let workspace = manifest_dir.parent().unwrap().to_path_buf();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+    println!("cargo:rerun-if-changed=data/narf-hermit-poc/guest_x86_64.S");
+    if env::var_os("CARGO_FEATURE_REVERIE_NARF_POC").is_some() {
+        build_reverie_narf_poc_guest(&manifest_dir, &out_dir);
+    } else {
+        println!("cargo:rustc-env=NARF_REVERIE_POC_GUEST_X86_64=/dev/null");
+    }
+
     let testbin_enabled = env::var_os("CARGO_FEATURE_USER_MODE_TESTBIN").is_some();
     let boot_init_enabled = env::var_os("CARGO_FEATURE_BOOT_INIT").is_some();
     let testbin_dir = workspace.join("userspace").join("testbin");
@@ -955,6 +962,58 @@ fn which(prog: &str) -> Option<PathBuf> {
     env::split_paths(&path)
         .map(|dir| dir.join(prog))
         .find(|full| full.is_file())
+}
+
+fn build_reverie_narf_poc_guest(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
+    let source = manifest_dir.join("data/narf-hermit-poc/guest_x86_64.S");
+    let object = out_dir.join("narf-hermit-poc-guest.o");
+    let binary = out_dir.join("narf-hermit-poc-guest");
+    let assembler = which("as").expect("reverie-narf-poc requires GNU as on PATH");
+    let linker = which("ld").expect("reverie-narf-poc requires GNU ld on PATH");
+    let strip = which("strip").expect("reverie-narf-poc requires GNU strip on PATH");
+
+    let status = Command::new(assembler)
+        .args(["--64", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .status()
+        .unwrap_or_else(|error| panic!("spawn assembler for reverie-narf-poc guest: {error}"));
+    assert!(
+        status.success(),
+        "reverie-narf-poc guest assembly failed: {status}"
+    );
+
+    let status = Command::new(linker)
+        .args([
+            "-static",
+            "-nostdlib",
+            "-z",
+            "noexecstack",
+            "-Ttext-segment=0x8000001000",
+            "-o",
+        ])
+        .arg(&binary)
+        .arg(&object)
+        .status()
+        .unwrap_or_else(|error| panic!("spawn linker for reverie-narf-poc guest: {error}"));
+    assert!(
+        status.success(),
+        "reverie-narf-poc guest link failed: {status}"
+    );
+
+    let status = Command::new(strip)
+        .args(["--strip-all"])
+        .arg(&binary)
+        .status()
+        .unwrap_or_else(|error| panic!("spawn strip for reverie-narf-poc guest: {error}"));
+    assert!(
+        status.success(),
+        "reverie-narf-poc guest strip failed: {status}"
+    );
+    println!(
+        "cargo:rustc-env=NARF_REVERIE_POC_GUEST_X86_64={}",
+        binary.display()
+    );
 }
 
 fn build_arch(

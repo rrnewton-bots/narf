@@ -4667,6 +4667,9 @@ fn boot_userspace_init() {
         SyscallTable,
     };
 
+    #[cfg(feature = "reverie-narf-poc")]
+    let bytes = narf_verification::NARF_REVERIE_POC_GUEST_ELF;
+    #[cfg(not(feature = "reverie-narf-poc"))]
     let bytes = narf_verification::NARF_INIT_ELF;
     if bytes.is_empty() {
         let _ = writeln!(
@@ -5648,6 +5651,7 @@ BUG_REPORT_URL=\"https://github.com/dhodges-daniel/narf/issues\"\n";
     // `/bin/shell`, so the shell runs with real job control. `baked_shell`
     // is seeded at `/bin/shell` (above) for getty's execve.
     let _ = baked_shell;
+    #[cfg(not(feature = "reverie-narf-poc"))]
     spawn_one("getty", narf_verification::NARF_GETTY_ELF);
 
     // Off-box network serving smoke (opt-in `qemu-net`): auto-spawn the

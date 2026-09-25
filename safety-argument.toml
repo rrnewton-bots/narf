@@ -1191,3 +1191,11 @@ argument = "The frame change is an opt-in POC feature which installs the already
 [[invariants_preserved]]
 ref = "security-model/specification/spec.md#L42"
 argument = "The adapter receives only the immutable syscall snapshot and the kernel-owned native transition. Tool global state stays in kernel memory behind Rust shared-reference and atomic or lock synchronization, per-task state is removed from its IRQ-safe map before the callback and restored afterward, and injected calls re-enter only the existing native dispatcher while bypassing recursive interception. The adapter cannot obtain a guest pointer, capability, mapping handle, trap frame, or domain-transition primitive through this interface; unexpected suspension or recursive task entry stops the kernel."
+
+[[invariants_preserved]]
+ref = "security-model/specification/spec.md#L39"
+argument = "The equivalence fixture is compiled and selected only by the opt-in reverie-narf-poc feature. Frame uses the existing ELF loader, task construction, syscall table, and scheduler paths; it introduces no new privileged entry, trusted subsystem, capability, mapping authority, domain assignment, or production-default behavior."
+
+[[invariants_preserved]]
+ref = "security-model/specification/spec.md#L42"
+argument = "The bounded Tool receives only immutable scalar syscall metadata and the existing native transition. It accepts exactly the fixture's write and exit calls, forwards them through the native dispatcher, and stops the kernel on every other call. Its INFO output contains the already observable syscall number, used scalar arguments, sequence, and return value; it neither reads guest memory nor obtains a trap-frame, capability, mapping, or domain handle."

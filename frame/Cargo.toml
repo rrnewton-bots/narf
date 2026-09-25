@@ -345,7 +345,12 @@ narf-libc-validate = ["user-mode-e2e", "narf-verification/narf-libc-validate"]
 boot-init = ["dep:narf-verification", "narf-verification/boot-init"]
 # POC-only installation of the general Reverie/Narf adapter on the production
 # syscall table. The adapter and Tool state remain direct kernel references.
-reverie-narf-poc = ["dep:reverie-narf-adapter", "dep:reverie-narf-core"]
+reverie-narf-poc = [
+    "dep:reverie-narf-adapter",
+    "dep:reverie-narf-core",
+    "dep:narf-verification",
+    "narf-verification/reverie-narf-poc",
+]
 
 [lints]
 workspace = true

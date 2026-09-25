@@ -105,6 +105,9 @@ user-mode-testbin = ["user-mode-e2e", "boot-init"]
 # `narf-frame` consumes the consts in its production `run_async_demo`
 # path so init can actually be loaded + spawned at boot.
 boot-init = ["dep:narf-busybox"]
+# Build and expose the one syscall-instruction ELF shared by the Hermit/Narf
+# equivalence POC. Kept opt-in so ordinary verification builds need no binutils.
+reverie-narf-poc = []
 # Opt-in narf-libc validate-binary runner. Like user-mode-testbin,
 # this builds + loads a real Rust user binary — but the binary is
 # linked against `narf-libc` (the relibc-shaped libc shim) rather

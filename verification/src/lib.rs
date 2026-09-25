@@ -4754,6 +4754,10 @@ pub const NARF_HELLO_STATIC_ELF: &[u8] = include_bytes!(env!("NARF_HELLO_STATIC_
 ))]
 pub const NARF_HELLO_STATIC_ELF: &[u8] = include_bytes!(env!("NARF_HELLO_STATIC_ELF_AARCH64"));
 
+/// The libc-free syscall-instruction guest shared by the Hermit/Narf POC.
+#[cfg(all(target_arch = "x86_64", feature = "reverie-narf-poc"))]
+pub const NARF_REVERIE_POC_GUEST_ELF: &[u8] = include_bytes!(env!("NARF_REVERIE_POC_GUEST_X86_64"));
+
 // Wave-78 follow-up 2: real musl-static binary. Compiled with
 // `musl-gcc -static -no-pie`; sources + REGEN_musl.sh live in
 // `verification/data/musl-demo/`. Seeded at /bin/hello_musl so
