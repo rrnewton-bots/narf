@@ -164,14 +164,27 @@ static IN_INSTRUCTION_CALLBACK: [AtomicBool; narf_lib::percpu::MAX_CPUS] =
 
 /// Publish the kernel-lifetime instruction interceptor exactly once.
 ///
-/// A losing concurrent caller retains ownership of its interceptor. Successful
-/// publication also activates the requested trap mechanism on every currently
-/// online CPU before returning. Schedulers must additionally call
+/// Installation is a pre-guest operation: the caller must not create a user
+/// task until this returns. Publication, the vDSO clock-mode switch, and the
+/// per-CPU trap activation are separate steps, so a guest running during them
+/// could see some CPUs trapping and others not, or a vDSO clock read that
+/// began before the switch. Installation linearizes at its successful return;
+/// because no user task exists from the entry check to the exit check, no
+/// guest observes any intermediate combination.
+///
+/// Returns the interceptor when another one is already published, when a user
+/// task is live, or when a multi-CPU timestamp trap has no SMP rendezvous. A
+/// user task spawned during installation stops the kernel: publication is
+/// one-shot and cannot be rolled back. Schedulers must additionally call
 /// [`activate_current_cpu_instruction_interception`] before a newly-online CPU
 /// can return an instrumented task to user mode.
 pub fn try_install_instruction_interceptor(
     interceptor: Box<dyn InstructionInterceptor>,
 ) -> Result<(), Box<dyn InstructionInterceptor>> {
+    let spawned = narf_scheduler::user_tasks_spawned();
+    if narf_scheduler::live_user_task_count() != 0 {
+        return Err(interceptor);
+    }
     let subscriptions = interceptor.subscriptions();
     #[cfg(target_arch = "x86_64")]
     if subscriptions.requires_timestamp_trap()
@@ -192,6 +205,13 @@ pub fn try_install_instruction_interceptor(
         Ordering::Acquire,
     ) {
         Ok(_) => {
+            // Route vDSO clock reads through syscalls before arming the trap:
+            // the vDSO would otherwise convert a (virtualized) counter read
+            // with the host scale, while the clock syscalls read the native
+            // counter, giving the guest two unrelated time bases.
+            if subscriptions.requires_timestamp_trap() {
+                crate::vdso::route_clocks_through_syscalls();
+            }
             #[cfg(target_arch = "x86_64")]
             if subscriptions.requires_timestamp_trap() {
                 narf_arch::x86_64::cr::request_user_rdtsc_interception();
@@ -210,6 +230,13 @@ pub fn try_install_instruction_interceptor(
                     "instruction interception rendezvous disappeared after preflight"
                 );
             }
+            // Every step above is complete on every online CPU. Any user task
+            // spawned after this check starts on the fully installed state.
+            core::sync::atomic::fence(Ordering::SeqCst);
+            assert!(
+                narf_scheduler::user_tasks_spawned() == spawned,
+                "a user task was spawned during instruction interceptor installation"
+            );
             Ok(())
         }
         Err(_) => {
@@ -337,6 +364,7 @@ pub(crate) fn __test_clear_instruction_interceptor() {
     // A CPU may already hold the loaded pointer, so test retirement never
     // reclaims the old allocation. Production has no public reset operation.
     let _retired = GLOBAL_INTERCEPTOR.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    crate::vdso::__test_restore_counter_clocks();
 }
 
 #[cfg(feature = "verification-test-reset")]

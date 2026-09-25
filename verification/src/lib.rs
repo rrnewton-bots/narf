@@ -3867,6 +3867,468 @@ kernel_test_in!(
     smoke_x86_64_cr4_writes_keep_requested_tsd
 );
 
+/// Offset of the dynamic symbol `name` in a little-endian ELF64 image whose
+/// file offsets equal its virtual addresses (the vDSO link layout).
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+fn vdso_symbol_offset(elf: &[u8], name: &[u8]) -> Option<u64> {
+    const SHT_DYNSYM: u32 = 11;
+    let u16_at = |o: usize| Some(u16::from_le_bytes(elf.get(o..o + 2)?.try_into().ok()?));
+    let u32_at = |o: usize| Some(u32::from_le_bytes(elf.get(o..o + 4)?.try_into().ok()?));
+    let u64_at = |o: usize| Some(u64::from_le_bytes(elf.get(o..o + 8)?.try_into().ok()?));
+    let shoff = u64_at(0x28)? as usize;
+    let shentsize = u16_at(0x3A)? as usize;
+    let shnum = u16_at(0x3C)? as usize;
+    for i in 0..shnum {
+        let sh = shoff + i * shentsize;
+        if u32_at(sh + 4)? != SHT_DYNSYM {
+            continue;
+        }
+        let symoff = u64_at(sh + 24)? as usize;
+        let symsize = u64_at(sh + 32)? as usize;
+        let strsh = shoff + u32_at(sh + 40)? as usize * shentsize;
+        let stroff = u64_at(strsh + 24)? as usize;
+        for sym in (symoff..symoff + symsize).step_by(24) {
+            let start = stroff + u32_at(sym)? as usize;
+            let len = elf.get(start..)?.iter().position(|&b| b == 0)?;
+            if &elf[start..start + len] == name {
+                return u64_at(sym + 8);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+fn smoke_x86_64_vdso_clocks_use_syscalls_under_timestamp_interception() -> TestResult {
+    // Install an RDTSC interceptor alongside a syscall interceptor, then call
+    // the real vDSO's clock_gettime, time and gettimeofday from ring 3. With a
+    // timestamp interceptor installed each must issue its syscall and return
+    // the tool's result, and none may read the counter: a counter read would
+    // enter the RDTSC interceptor and the vDSO would convert the tool's value
+    // with the host scale, a second time base the syscalls never report. A
+    // final guest RDTSC is the positive control that the trap is armed and
+    // reaches the tool exactly once.
+    use core::arch::naked_asm;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
+    use narf_userspace::{
+        install_global, instruction::__verification_clear_instruction_interceptor,
+        syscall::__verification_clear_global as __test_clear_global,
+        try_install_instruction_interceptor, vdso, InstructionInterception, InstructionInterceptor,
+        InstructionInvocation, InstructionResult, InstructionSubscriptions,
+        NondeterministicInstruction, Syscall, SyscallHandler, SyscallInterception,
+        SyscallInterceptor, SyscallInvocation, SyscallReturn, SyscallTable, TrapContext,
+    };
+
+    const CLOCK_GETTIME: u32 = 228;
+    const GETTIMEOFDAY: u32 = 96;
+    const TIME: u32 = 201;
+    const CLOCK_MONOTONIC: u64 = 1;
+    // clock_gettime and gettimeofday return `int` through the vDSO, so their
+    // magics fit in 31 bits; time returns a full 64-bit value.
+    const CLOCK_MAGIC: u64 = 0x1357_2468;
+    const GTOD_MAGIC: u64 = 0x2468_1357;
+    const TIME_MAGIC: u64 = 0x7777_0000_1111_2222;
+    const RDTSC_MAGIC: u64 = 0x0BAD_C0DE_1234_5678;
+    const CODE_VADDR: u64 = 0x0000_0080_0000_0000;
+    const STACK_VADDR: u64 = 0x0000_0080_0000_1000;
+    const TS_VADDR: u64 = STACK_VADDR + 0x800;
+    const TV_VADDR: u64 = STACK_VADDR + 0x900;
+    static CLOCK_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static CLOCK_ARGS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static GTOD_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static GTOD_ARGS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static TIME_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static TIME_ARG: AtomicU64 = AtomicU64::new(0);
+    static RDTSC_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static SEEN: [AtomicU64; 4] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
+    static mut JMP: UserModeJmpBuf = UserModeJmpBuf {
+        rbx: 0,
+        rbp: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+        rsp: 0,
+        rip: 0,
+    };
+
+    struct ClockProbe;
+    impl SyscallInterceptor for ClockProbe {
+        fn on_syscall_enter(
+            &self,
+            invocation: &SyscallInvocation,
+            _native: &mut dyn narf_userspace::NativeSyscallTransition,
+        ) -> SyscallInterception {
+            let args = &invocation.args;
+            let magic = match invocation.raw_number {
+                CLOCK_GETTIME => {
+                    CLOCK_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                    CLOCK_ARGS[0].store(args.arg0, Ordering::Relaxed);
+                    CLOCK_ARGS[1].store(args.arg1, Ordering::Relaxed);
+                    CLOCK_MAGIC
+                }
+                GETTIMEOFDAY => {
+                    GTOD_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                    GTOD_ARGS[0].store(args.arg0, Ordering::Relaxed);
+                    GTOD_ARGS[1].store(args.arg1, Ordering::Relaxed);
+                    GTOD_MAGIC
+                }
+                TIME => {
+                    TIME_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                    TIME_ARG.store(args.arg0, Ordering::Relaxed);
+                    TIME_MAGIC
+                }
+                _ => return SyscallInterception::Continue,
+            };
+            SyscallInterception::Complete(SyscallReturn::ok(magic))
+        }
+    }
+
+    struct RdtscProbe;
+    // SAFETY: every callback uses only preallocated atomics and typed values;
+    // it does not allocate, park, lock, await, or re-enter guest execution.
+    unsafe impl InstructionInterceptor for RdtscProbe {
+        fn subscriptions(&self) -> InstructionSubscriptions {
+            InstructionSubscriptions::RDTSC
+        }
+
+        fn on_instruction_enter(
+            &self,
+            invocation: &InstructionInvocation,
+        ) -> InstructionInterception {
+            if invocation.instruction == NondeterministicInstruction::Rdtsc {
+                RDTSC_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                InstructionInterception::Complete(InstructionResult::Rdtsc { value: RDTSC_MAGIC })
+            } else {
+                InstructionInterception::Continue
+            }
+        }
+
+        fn on_instruction_return(
+            &self,
+            _invocation: &InstructionInvocation,
+            result: InstructionResult,
+        ) -> InstructionResult {
+            result
+        }
+    }
+
+    #[unsafe(naked)]
+    unsafe extern "C" fn resume_trampoline() -> ! {
+        naked_asm!(
+            "lea rdi, [rip + {jmp}]",
+            "mov rsi, 1",
+            "jmp {lj}",
+            jmp = sym JMP,
+            lj = sym user_mode_longjmp,
+        );
+    }
+
+    struct UnwindHandler;
+    impl SyscallHandler for UnwindHandler {
+        fn handle(&self, ctx: &mut dyn TrapContext) {
+            let args = ctx.args();
+            SEEN[0].store(args.arg0, Ordering::Release);
+            SEEN[1].store(args.arg1, Ordering::Release);
+            SEEN[2].store(args.arg2, Ordering::Release);
+            SEEN[3].store(args.arg3, Ordering::Release);
+            let _ =
+                ctx.redirect_to_kernel(resume_trampoline as usize as u64, 0xFFFF_FFFF_FFFF_FFF0);
+        }
+    }
+
+    for counter in [
+        &CLOCK_ENTRIES,
+        &CLOCK_ARGS[0],
+        &CLOCK_ARGS[1],
+        &GTOD_ENTRIES,
+        &GTOD_ARGS[0],
+        &GTOD_ARGS[1],
+        &TIME_ENTRIES,
+        &TIME_ARG,
+        &RDTSC_ENTRIES,
+        &SEEN[0],
+        &SEEN[1],
+        &SEEN[2],
+        &SEEN[3],
+    ] {
+        counter.store(u64::MAX, Ordering::Relaxed);
+    }
+    for counter in [&CLOCK_ENTRIES, &GTOD_ENTRIES, &TIME_ENTRIES, &RDTSC_ENTRIES] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    __test_clear_global();
+    __verification_clear_instruction_interceptor();
+
+    let original_cr3: u64;
+    // SAFETY: read the active kernel address space so the non-local return can
+    // restore it after the user-mode side trip.
+    unsafe {
+        core::arch::asm!("mov {v}, cr3", v = out(reg) original_cr3,
+            options(nostack, preserves_flags));
+    }
+    SAVED_CR3.store(original_cr3, Ordering::Release);
+
+    // SAFETY: JMP is dedicated storage for this single-threaded test.
+    let saved = unsafe { user_mode_setjmp(core::ptr::addr_of_mut!(JMP)) };
+    if saved != 0 {
+        // SAFETY: restore the exact kernel CR3 and GS state saved before ring 3.
+        unsafe {
+            let cr3 = SAVED_CR3.load(Ordering::Acquire);
+            core::arch::asm!("mov cr3, {v}", v = in(reg) cr3,
+                options(nostack, preserves_flags));
+            const IA32_KERNEL_GS_BASE: u32 = 0xC0000102;
+            core::arch::asm!(
+                "wrmsr",
+                in("ecx") IA32_KERNEL_GS_BASE,
+                in("eax") 0u32,
+                in("edx") 0u32,
+                options(nostack, preserves_flags),
+            );
+            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        }
+        __test_clear_global();
+        __verification_clear_instruction_interceptor();
+        if vdso::clocks_route_through_syscalls() {
+            return TestResult::Fail("interceptor reset did not restore the vDSO counter path");
+        }
+        if RDTSC_ENTRIES.load(Ordering::Acquire) != 1 {
+            return TestResult::Fail("vDSO clock read the counter instead of issuing its syscall");
+        }
+        if SEEN[3].load(Ordering::Acquire) != RDTSC_MAGIC {
+            return TestResult::Fail("control RDTSC did not receive the interceptor value");
+        }
+        if CLOCK_ENTRIES.load(Ordering::Acquire) != 1
+            || CLOCK_ARGS[0].load(Ordering::Acquire) != CLOCK_MONOTONIC
+            || CLOCK_ARGS[1].load(Ordering::Acquire) != TS_VADDR
+        {
+            return TestResult::Fail("vDSO clock_gettime did not issue clock_gettime(1, ts) once");
+        }
+        if TIME_ENTRIES.load(Ordering::Acquire) != 1 || TIME_ARG.load(Ordering::Acquire) != 0 {
+            return TestResult::Fail("vDSO time did not issue time(NULL) once");
+        }
+        if GTOD_ENTRIES.load(Ordering::Acquire) != 1
+            || GTOD_ARGS[0].load(Ordering::Acquire) != TV_VADDR
+            || GTOD_ARGS[1].load(Ordering::Acquire) != 0
+        {
+            return TestResult::Fail("vDSO gettimeofday did not issue gettimeofday(tv, NULL) once");
+        }
+        if SEEN[0].load(Ordering::Acquire) != CLOCK_MAGIC
+            || SEEN[1].load(Ordering::Acquire) != TIME_MAGIC
+            || SEEN[2].load(Ordering::Acquire) != GTOD_MAGIC
+        {
+            return TestResult::Fail("vDSO clock entry did not return the tool's syscall result");
+        }
+        return TestResult::Pass;
+    }
+
+    let sleep = Syscall::Sleep.raw();
+    if [CLOCK_GETTIME, GETTIMEOFDAY, TIME].contains(&sleep) {
+        return TestResult::Fail("unwind syscall number collides with a clock syscall");
+    }
+    let (Some(clock_gettime), Some(time), Some(gettimeofday)) = (
+        vdso_symbol_offset(NARF_VDSO_ELF, b"__vdso_clock_gettime"),
+        vdso_symbol_offset(NARF_VDSO_ELF, b"__vdso_time"),
+        vdso_symbol_offset(NARF_VDSO_ELF, b"__vdso_gettimeofday"),
+    ) else {
+        return TestResult::Fail("vDSO image is empty or lacks a clock entry point");
+    };
+    vdso::register_vdso_image(NARF_VDSO_ELF, narf_scheduler::narf_time::cycles_per_ns());
+
+    let mut table = SyscallTable::new();
+    table.install_raw(Syscall::Sleep, "vdso-clock-unwind", UnwindHandler);
+    if table
+        .install_interceptor(alloc::boxed::Box::new(ClockProbe))
+        .is_err()
+    {
+        return TestResult::Fail("clock syscall interceptor installation failed");
+    }
+    install_global(table);
+    if vdso::clocks_route_through_syscalls() {
+        return TestResult::Fail("vDSO clocks used syscalls before any timestamp interceptor");
+    }
+    if try_install_instruction_interceptor(alloc::boxed::Box::new(RdtscProbe)).is_err() {
+        return TestResult::Fail("RDTSC interceptor installation failed");
+    }
+    if !vdso::clocks_route_through_syscalls() {
+        return TestResult::Fail("timestamp interceptor install did not route vDSO clocks");
+    }
+
+    // SAFETY: the test owns this fresh user address space until longjmp.
+    let address_space = match unsafe { AddressSpace::new_for_user() } {
+        Ok(address_space) => address_space,
+        Err(_) => return TestResult::Fail("new_for_user failed"),
+    };
+    let code_frame = match narf_memory::alloc_frame() {
+        Ok(frame) => frame.start_address(),
+        Err(_) => return TestResult::Fail("alloc code frame"),
+    };
+    let stack_frame = match narf_memory::alloc_frame() {
+        Ok(frame) => frame.start_address(),
+        Err(_) => return TestResult::Fail("alloc stack frame"),
+    };
+    address_space
+        .map_region(Region {
+            base: VirtAddr::new(CODE_VADDR),
+            len: 0x1000,
+            perms: RegionPerms::READ | RegionPerms::EXEC | RegionPerms::WRITE,
+            phys: alloc::vec![code_frame],
+        })
+        .ok();
+    address_space
+        .map_region(Region {
+            base: VirtAddr::new(STACK_VADDR),
+            len: 0x1000,
+            perms: RegionPerms::READ | RegionPerms::WRITE,
+            phys: alloc::vec![stack_frame],
+        })
+        .ok();
+    if vdso::map_into(&address_space) != Some(vdso::VDSO_VADDR) {
+        return TestResult::Fail("vDSO map_into failed");
+    }
+
+    let mut code = alloc::vec::Vec::new();
+    let movabs = |code: &mut alloc::vec::Vec<u8>, opcode: u8, value: u64| {
+        code.extend_from_slice(&[0x48, opcode]);
+        code.extend_from_slice(&value.to_le_bytes());
+    };
+    // clock_gettime(CLOCK_MONOTONIC, ts): mov edi,1; movabs rsi; movabs rax;
+    // call rax; mov r12d,eax
+    code.extend_from_slice(&[0xBF, CLOCK_MONOTONIC as u8, 0, 0, 0]);
+    movabs(&mut code, 0xBE, TS_VADDR);
+    movabs(&mut code, 0xB8, vdso::VDSO_VADDR + clock_gettime);
+    code.extend_from_slice(&[0xFF, 0xD0, 0x41, 0x89, 0xC4]);
+    // time(NULL): xor edi,edi; movabs rax; call rax; mov r13,rax
+    code.extend_from_slice(&[0x31, 0xFF]);
+    movabs(&mut code, 0xB8, vdso::VDSO_VADDR + time);
+    code.extend_from_slice(&[0xFF, 0xD0, 0x49, 0x89, 0xC5]);
+    // gettimeofday(tv, NULL): movabs rdi; xor esi,esi; movabs rax; call rax;
+    // mov r14d,eax
+    movabs(&mut code, 0xBF, TV_VADDR);
+    code.extend_from_slice(&[0x31, 0xF6]);
+    movabs(&mut code, 0xB8, vdso::VDSO_VADDR + gettimeofday);
+    code.extend_from_slice(&[0xFF, 0xD0, 0x41, 0x89, 0xC6]);
+    // rdtsc; shl rdx,32; or rdx,rax; mov r10,rdx; mov rdi,r12; mov rsi,r13;
+    // mov rdx,r14
+    code.extend_from_slice(&[
+        0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2, 0x49, 0x89, 0xD2, 0x4C, 0x89, 0xE7,
+        0x4C, 0x89, 0xEE, 0x4C, 0x89, 0xF2,
+    ]);
+    // mov eax,Sleep; int 0x80; ud2
+    code.push(0xB8);
+    code.extend_from_slice(&sleep.to_le_bytes());
+    code.extend_from_slice(&[0xCD, 0x80, 0x0F, 0x0B]);
+    // SAFETY: code_frame is exclusively owned and the copy fits one page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            code.as_ptr(),
+            code_frame.kernel_mut_ptr::<u8>(),
+            code.len(),
+        );
+    }
+    // SAFETY: materialize publishes the complete mappings constructed above.
+    if unsafe { address_space.materialize() }.is_err() {
+        return TestResult::Fail("materialize failed");
+    }
+    if address_space.activate().is_err() {
+        return TestResult::Fail("activate failed");
+    }
+    // SAFETY: enter mapped ring-3 code with a mapped stack and IRQs disabled
+    // across the transition. Success returns only via resume_trampoline.
+    unsafe {
+        core::arch::asm!("cli");
+        user_mode_enter(CODE_VADDR, STACK_VADDR + 0x1000)
+    }
+}
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+kernel_test_in!(
+    "verification/syscall-entry",
+    smoke_x86_64_vdso_clocks_use_syscalls_under_timestamp_interception
+);
+
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+fn smoke_x86_64_instruction_interceptor_install_requires_no_live_user_task() -> TestResult {
+    // Installation publishes the slot, switches the vDSO clocks and arms each
+    // CPU in separate steps, so it is specified as a pre-guest operation. With
+    // one user task live it must refuse before any of those steps; once that
+    // task has exited it must succeed and complete all of them.
+    use alloc::sync::Arc;
+    use narf_memory::AddressSpace;
+    use narf_userspace::{
+        instruction::__verification_clear_instruction_interceptor,
+        instruction_interception_enabled, try_install_instruction_interceptor, vdso,
+        InstructionInterceptor, InstructionSubscriptions, NondeterministicInstruction,
+    };
+
+    const CR4_TSD: u64 = 1 << 2;
+
+    struct RdtscProbe;
+    // SAFETY: the probe has no callback state; the default callbacks return
+    // `Continue` and the native value without allocating or blocking.
+    unsafe impl InstructionInterceptor for RdtscProbe {
+        fn subscriptions(&self) -> InstructionSubscriptions {
+            InstructionSubscriptions::RDTSC
+        }
+    }
+
+    __verification_clear_instruction_interceptor();
+    // Drop boot-time tasks so run_until_empty below returns once the probe
+    // task has exited, as the other scheduler-driving smokes do.
+    narf_scheduler::__reset_queues_for_test();
+    if narf_scheduler::live_user_task_count() != 0 {
+        return TestResult::Fail("a user task was already live before the installation probe");
+    }
+    // SAFETY: a fresh user root with no mappings; the task below never enters
+    // user mode because its future completes on its first poll.
+    let address_space = match unsafe { AddressSpace::new_for_user() } {
+        Ok(address_space) => Arc::new(address_space),
+        Err(_) => return TestResult::Fail("user address space allocation failed"),
+    };
+    let _task = narf_scheduler::spawn_user(
+        narf_scheduler::alloc_task_id(),
+        async {},
+        narf_scheduler::TaskSpec::user_task(),
+        address_space,
+    );
+    let refused = try_install_instruction_interceptor(alloc::boxed::Box::new(RdtscProbe)).is_err();
+    let published = instruction_interception_enabled(NondeterministicInstruction::Rdtsc);
+    let routed = vdso::clocks_route_through_syscalls();
+    let armed = narf_arch::x86_64::cr::cached_cr4() & CR4_TSD != 0;
+    narf_scheduler::run_until_empty();
+    if narf_scheduler::live_user_task_count() != 0 {
+        __verification_clear_instruction_interceptor();
+        return TestResult::Fail("probe user task did not exit");
+    }
+    let installed = try_install_instruction_interceptor(alloc::boxed::Box::new(RdtscProbe)).is_ok();
+    let installed_complete = instruction_interception_enabled(NondeterministicInstruction::Rdtsc)
+        && vdso::clocks_route_through_syscalls()
+        && narf_arch::x86_64::cr::cached_cr4() & CR4_TSD != 0;
+    __verification_clear_instruction_interceptor();
+
+    if !refused {
+        return TestResult::Fail("installation succeeded while a user task was live");
+    }
+    if published || routed || armed {
+        return TestResult::Fail("refused installation left a partial interceptor state");
+    }
+    if !installed || !installed_complete {
+        return TestResult::Fail("installation with no live user task did not complete");
+    }
+    TestResult::Pass
+}
+#[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
+kernel_test_in!(
+    "verification/syscall-entry",
+    smoke_x86_64_instruction_interceptor_install_requires_no_live_user_task
+);
+
 #[cfg(all(target_arch = "x86_64", feature = "user-mode-e2e"))]
 fn smoke_scheduled_user_interception_survives_ap_migration() -> TestResult {
     use alloc::sync::Arc;

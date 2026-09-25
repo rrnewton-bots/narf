@@ -304,6 +304,11 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 /// Live user-task count (processes + threads) for the fork-bomb guard.
 static LIVE_USER_TASKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// Monotonic count of user tasks ever spawned. Unlike [`LIVE_USER_TASKS`] it
+/// never decreases, so a caller that must run while no guest exists can prove
+/// that no user task was created (and possibly exited) during its window.
+static USER_TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
+
 /// Hard cap on concurrent user tasks. `fork`/`clone` return `EAGAIN` at the
 /// cap, containing a fork bomb before it exhausts kernel memory and the
 /// per-CPU ready queues (unbounded `VecDeque`s). Generous for real workloads;
@@ -320,6 +325,7 @@ impl NprocGuard {
     #[inline]
     fn new() -> Self {
         LIVE_USER_TASKS.fetch_add(1, Ordering::Relaxed);
+        USER_TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
         NprocGuard
     }
 }
@@ -339,6 +345,11 @@ impl Drop for TaskSlot {
 /// Current number of live user tasks (processes + threads).
 pub fn live_user_task_count() -> usize {
     LIVE_USER_TASKS.load(Ordering::Relaxed)
+}
+
+/// Number of user tasks spawned since boot; never decreases.
+pub fn user_tasks_spawned() -> u64 {
+    USER_TASKS_SPAWNED.load(Ordering::SeqCst)
 }
 
 /// Whether another user task may be spawned under [`MAX_USER_TASKS`]. `fork`

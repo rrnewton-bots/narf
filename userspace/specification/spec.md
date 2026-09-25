@@ -105,6 +105,35 @@ task-to-task handoff. A return to ring 3 from a trap or syscall stays on the
 CPU on which the task entered the kernel, which one of these points or the
 installation rendezvous has already armed. CR4.TSD is sticky: no production
 path clears it once set.
+Installing an interceptor that subscribes a timestamp family also switches
+the vDSO clock entry points (`clock_gettime`, `gettimeofday`, `time`) to their
+syscalls, as Linux does with `VDSO_CLOCKMODE_NONE`. The kernel publishes the
+mode in the read-only vvar page under the clock-scale seqlock before it raises
+the trap request, and the switch is sticky like the request. The guest
+therefore has one time base, which a tool virtualizes through the clock
+syscalls; without the switch the vDSO would convert a tool-supplied counter
+value with the host scale while the clock syscall handlers read the native
+counter. The vDSO reads the counter inside the seqlock read section, so a
+snapshot that saw counter mode is accepted only if the sequence is unchanged
+after the counter read; a counter read that traps can only follow the mode
+publication, so its snapshot is discarded and the retry issues the syscall.
+`clock_getres` already uses the syscall; the CPU-only `getcpu` path still reads
+`RDTSCP`, which the tool sees only if it subscribes that family.
+
+Installation is a pre-guest operation. Slot publication, the vDSO mode switch,
+the trap request, and the per-CPU rendezvous are separate steps, and a guest
+running between them could see some CPUs trap while others do not, or enter
+the tool from a vDSO read whose result is then discarded. Installation
+therefore refuses, before publishing anything, while any user task is live,
+and it stops the kernel if the monotonic user-task spawn count changed by the
+time every step has completed, because publication cannot be rolled back.
+Installation linearizes at its successful return: no user task exists from the
+entry check to the exit check, and every user task spawned afterwards sees the
+syscall clock mode and first enters user mode on a CPU already armed, by the
+rendezvous or by one of the activation points above. Eligibility is
+kernel-global rather than per process: once installed, every ring-3 timestamp
+instruction on every CPU traps, and a tool that virtualizes only some
+processes filters by the task identity in the invocation.
 The frame owner decodes only the exact unprefixed opcodes `0f 31` and
 `0f 01 f9`, captures immutable task/RIP metadata, executes native emulation at
 most once under `Continue` or accepts a typed completed value, applies a

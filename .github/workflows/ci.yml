@@ -862,6 +862,8 @@ jobs:
             'verification/syscall-entry / smoke_frame_x86_64_user_mode_fast_syscall_interceptor' \
             'verification/syscall-entry / smoke_frame_x86_64_user_mode_rdtscp_interceptor' \
             'verification/syscall-entry / smoke_x86_64_cr4_writes_keep_requested_tsd' \
+            'verification/syscall-entry / smoke_x86_64_vdso_clocks_use_syscalls_under_timestamp_interception' \
+            'verification/syscall-entry / smoke_x86_64_instruction_interceptor_install_requires_no_live_user_task' \
             'verification/interception-migration / smoke_scheduled_user_interception_survives_ap_migration'
           do
             grep -qF "[ OK ] $t" interception-smp2.log || { echo "::error::not OK: $t"; exit 1; }
