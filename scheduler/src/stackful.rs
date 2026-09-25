@@ -4769,8 +4769,9 @@ pub mod tests {
     /// CR4.TSD is per-CPU, while the instruction interceptor is kernel-global.
     /// Model a task's first switch-in after migration by clearing only this
     /// CPU's bit while retaining the global request. The real own-stack switch
-    /// path must restore TSD before task code can execute.
-    #[cfg(target_arch = "x86_64")]
+    /// path must restore TSD before task code can execute. The CR4 test resets
+    /// it uses exist only in kernel-test builds of narf-arch.
+    #[cfg(all(target_arch = "x86_64", feature = "kernel-test"))]
     fn smoke_user_instruction_interception_reapplied_on_switch() -> TestResult {
         use core::sync::atomic::AtomicBool;
 
@@ -7967,7 +7968,7 @@ pub mod tests {
         "scheduler/stackful",
         smoke_user_own_stack_retargets_kernel_entry_stack
     );
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "kernel-test"))]
     kernel_test_in!(
         "scheduler/stackful",
         smoke_user_instruction_interception_reapplied_on_switch
