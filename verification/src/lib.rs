@@ -4148,8 +4148,18 @@ fn smoke_scheduled_user_interception_survives_ap_migration() -> TestResult {
     let user_id = narf_userspace::user_task::spawn_user_process(process, source_spec);
     EXPECTED_TASK.store(user_id.raw(), Ordering::Release);
 
-    narf_scheduler::spawn(async {
+    // The waiter keeps the executor alive until the guest's ExitTask. It is
+    // bounded so a guest that dies without reaching ExitTask fails this test
+    // with a diagnosis instead of hanging the suite until the QEMU timeout.
+    // 3e10 cycles is about 10 s at 3 GHz.
+    const WAITER_BUDGET_CYCLES: u64 = 30_000_000_000;
+    let waiter_deadline = narf_time::Instant::now().plus_cycles(WAITER_BUDGET_CYCLES);
+    narf_scheduler::spawn(async move {
         while EXIT_TASK.load(Ordering::Acquire) == 0 {
+            if narf_time::Instant::now() >= waiter_deadline {
+                CONTROLLER_ERROR.store(1, Ordering::Release);
+                return;
+            }
             narf_scheduler::yield_now().await;
         }
     });
@@ -4179,7 +4189,7 @@ fn smoke_scheduled_user_interception_survives_ap_migration() -> TestResult {
     let expected_task = EXPECTED_TASK.load(Ordering::Acquire);
     match CONTROLLER_ERROR.load(Ordering::Acquire) {
         0 => {}
-        1 => return TestResult::Fail("migration waiter failed before guest exit"),
+        1 => return TestResult::Fail("guest did not reach ExitTask within the waiter budget"),
         2 => return TestResult::Fail("scheduler rejected the destination affinity"),
         _ => return TestResult::Fail("migration controller reported an unknown failure"),
     }
