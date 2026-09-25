@@ -832,6 +832,13 @@ pub(crate) fn request_current_sync_requeue(target_cpu: u32) {
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn prepare_direct_arch_state(task: &KernelTask) {
+    // A direct handoff resumes the target without the own-stack switch-in
+    // below, so it applies the monotonic CR4.TSD request here as well. This
+    // is defense in depth: the handoff stays on the CPU where its source
+    // task already passed an activation point or the install rendezvous,
+    // and no production path clears TSD, so deleting this call changes no
+    // tested outcome.
+    narf_arch::x86_64::cr::activate_requested_user_instruction_interception();
     let top = ((task.stack.as_ptr() as u64) + task.stack.len() as u64) & !0xFu64;
     crate::retarget_kernel_stack(top);
     if task.user_tls_valid.load(Ordering::Acquire) {
@@ -1977,6 +1984,7 @@ impl KernelTask {
             // bring-up. Apply that monotonic request on every destination CPU
             // before a task can resume and return to ring 3. This is required
             // after migration because the user future is not polled again.
+            // `prepare_direct_arch_state` does the same for direct handoffs.
             narf_arch::x86_64::cr::activate_requested_user_instruction_interception();
             let top = ((self.stack.as_ptr() as u64) + self.stack.len() as u64) & !0xFu64;
             crate::retarget_kernel_stack(top);
