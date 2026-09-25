@@ -2497,8 +2497,8 @@ fn smoke_frame_x86_64_int80_dispatches_through_global() -> TestResult {
     use core::arch::asm;
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_userspace::{
-        install_global, syscall::__test_clear_global, Syscall, SyscallArgs, SyscallReturn,
-        SyscallTable,
+        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallArgs, SyscallReturn, SyscallTable,
     };
 
     static SEEN: AtomicU64 = AtomicU64::new(0);
@@ -2554,8 +2554,8 @@ fn smoke_frame_aarch64_svc_dispatches_through_global() -> TestResult {
     use core::arch::asm;
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_userspace::{
-        install_global, syscall::__test_clear_global, Syscall, SyscallArgs, SyscallReturn,
-        SyscallTable,
+        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallArgs, SyscallReturn, SyscallTable,
     };
 
     static SEEN: AtomicU64 = AtomicU64::new(0);
@@ -2752,7 +2752,8 @@ mod aarch64_el0_preemption_e2e {
     use narf_memory::{AddressSpace, PhysAddr, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
         install_core_syscalls, install_global, install_user_task_hooks,
-        syscall::__test_clear_global, Syscall, SyscallTable, UserProcess,
+        syscall::__verification_clear_global as __test_clear_global, Syscall, SyscallTable,
+        UserProcess,
     };
 
     use super::{kernel_test_in, TestResult};
@@ -3108,8 +3109,8 @@ fn smoke_frame_x86_64_user_mode_roundtrip() -> TestResult {
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
-        install_global, syscall::__test_clear_global, Syscall, SyscallHandler, SyscallTable,
-        TrapContext,
+        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallHandler, SyscallTable, TrapContext,
     };
 
     static SEEN_MAGIC: AtomicU64 = AtomicU64::new(0);
@@ -3291,8 +3292,8 @@ fn smoke_frame_x86_64_user_mode_yield_resume() -> TestResult {
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
-        install_global, syscall::__test_clear_global, Syscall, SyscallHandler, SyscallTable,
-        TrapContext,
+        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallHandler, SyscallTable, TrapContext,
     };
 
     static SEEN_MAGIC: AtomicU64 = AtomicU64::new(0);
@@ -3534,8 +3535,8 @@ fn smoke_frame_x86_64_user_task_poll_yield_exit() -> TestResult {
     use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
         clear_current_user_task, install_current_user_task, install_exit_hook, install_global,
-        install_yield_hook, syscall::__test_clear_global, Syscall, SyscallTable, UserTaskCtx,
-        EXIT_REASON_EXITED, EXIT_REASON_YIELDED,
+        install_yield_hook, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallTable, UserTaskCtx, EXIT_REASON_EXITED, EXIT_REASON_YIELDED,
     };
 
     static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
@@ -3733,7 +3734,8 @@ fn smoke_userspace_user_task_future_yield_exit() -> TestResult {
     use narf_memory::{AddressSpace, Region, RegionPerms, VirtAddr};
     use narf_userspace::{
         install_core_syscalls, install_global, install_user_task_hooks,
-        syscall::__test_clear_global, Syscall, SyscallTable, UserProcess,
+        syscall::__verification_clear_global as __test_clear_global, Syscall, SyscallTable,
+        UserProcess,
     };
 
     static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
@@ -3906,8 +3908,8 @@ fn smoke_userspace_tls_round_trip() -> TestResult {
     use core::arch::naked_asm;
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_userspace::{
-        install_global, syscall::__test_clear_global, Syscall, SyscallHandler, SyscallTable,
-        TrapContext,
+        install_global, syscall::__verification_clear_global as __test_clear_global, Syscall,
+        SyscallHandler, SyscallTable, TrapContext,
     };
 
     // The user code emits two syscalls:
@@ -5257,8 +5259,8 @@ fn smoke_frame_x86_64_run_narf_testbin() -> TestResult {
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_userspace::{
         clear_exit_landing, install_address_space_lookup, install_core_syscalls, install_global,
-        load_user_process_with, set_exit_landing, syscall::__test_clear_global, AuxEntry,
-        SyscallTable,
+        load_user_process_with, set_exit_landing,
+        syscall::__verification_clear_global as __test_clear_global, AuxEntry, SyscallTable,
     };
 
     static mut JMP2: UserModeJmpBuf = UserModeJmpBuf {
@@ -5507,8 +5509,8 @@ fn smoke_frame_x86_64_run_narf_libc_validate() -> TestResult {
     use core::sync::atomic::{AtomicU64, Ordering};
     use narf_userspace::{
         clear_exit_landing, install_address_space_lookup, install_core_syscalls, install_global,
-        load_user_process_with, set_exit_landing, syscall::__test_clear_global, AuxEntry,
-        SyscallTable,
+        load_user_process_with, set_exit_landing,
+        syscall::__verification_clear_global as __test_clear_global, AuxEntry, SyscallTable,
     };
 
     static mut JMP3: UserModeJmpBuf = UserModeJmpBuf {
