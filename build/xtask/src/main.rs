@@ -3513,6 +3513,11 @@ fn musl_demo_cmd(args: &MuslDemoArgs) -> Result<()> {
         ("getrandom_smoke", "getrandom-ok"),
         ("sockpair_smoke", "sockpair-ok"),
         ("accept4_smoke", "accept4-ok"),
+        // getpid_loop microbenchmark: N raw getpid syscalls, R rounds.
+        ("getpid_loop 1000 1", "getpid-loop-done"),
+        ("getpid_loop 100000 5", "getpid-loop-done"),
+        ("getpid_loop 1000000 5", "getpid-loop-done"),
+        ("getpid_loop 10000000 5", "getpid-loop-done"),
         // The terminal chain end to end (see ptyspawn_smoke_x86_64.c). Anchored
         // on its own success line, which the probe prints ONLY when the
         // child's output actually came back off the master — "probe done"

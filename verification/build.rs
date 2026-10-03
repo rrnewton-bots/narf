@@ -238,6 +238,16 @@ fn main() {
     );
     println!("cargo:rustc-env=NARF_HELLO_MUSL_ELF_AARCH64=/dev/null");
 
+    // getpid_loop: raw-syscall microbenchmark (no libc, gcc only), committed
+    // prebuilt; see data/musl-demo/REGEN_getpid_loop.sh.
+    println!("cargo:rerun-if-changed=data/musl-demo/getpid_loop_x86_64");
+    let getpid_loop = manifest_dir.join("data/musl-demo/getpid_loop_x86_64");
+    println!(
+        "cargo:rustc-env=NARF_GETPID_LOOP_ELF_X86_64={}",
+        getpid_loop.display()
+    );
+    println!("cargo:rustc-env=NARF_GETPID_LOOP_ELF_AARCH64=/dev/null");
+
     // Wave-78 follow-up 3: dynamic-linked musl demo binary + the
     // ld-musl interpreter it depends on. The binary's PT_INTERP
     // points at `/lib/ld-musl-x86_64.so.1`; NARF stages ld-musl

@@ -5398,6 +5398,7 @@ fn boot_userspace_init() {
                     narf_verification::NARF_GETRANDOM_SMOKE_ELF,
                 ),
                 ("sockpair_smoke", narf_verification::NARF_SOCKPAIR_SMOKE_ELF),
+                ("getpid_loop", narf_verification::NARF_GETPID_LOOP_ELF),
                 // socketpair(2) across fork(2): the child writes, the PARENT
                 // waits with poll/epoll — dbus-daemon's babysitter protocol.
                 (
